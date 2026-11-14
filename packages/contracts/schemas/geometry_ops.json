@@ -1,0 +1,54 @@
+{
+  "$comment": "Single source of truth for the G-reality SDF scene language (geometry AST). Consumed by the Python validator (greality_contracts.geometry), the TypeScript AST->GLSL compiler, the TypeScript CPU evaluator, and golden-vector tests. Units: meters, Y-up, right-handed. Changing semantics of an op requires bumping language_version.",
+  "language_version": 1,
+  "limits": {
+    "max_depth": 12,
+    "max_nodes": 128,
+    "max_abs_coordinate": 10000.0,
+    "max_bound_radius": 200.0
+  },
+  "param_types": {
+    "scalar": "finite float or {\"ref\": \"<parameter name>\"}",
+    "vec3": "array of 3 scalars",
+    "quat": "array of 4 finite floats (x, y, z, w), normalized by the compiler",
+    "int": "integer"
+  },
+  "ops": {
+    "sphere":     { "class": "primitive", "children": [0, 0], "params": { "radius": { "type": "scalar", "min": 0.001, "max": 200 } } },
+    "ellipsoid":  { "class": "primitive", "children": [0, 0], "params": { "radii": { "type": "vec3", "min": 0.001, "max": 200 } }, "note": "bound-corrected approximation (not exact distance); step scale 0.8" },
+    "box":        { "class": "primitive", "children": [0, 0], "params": { "half": { "type": "vec3", "min": 0.001, "max": 200 } } },
+    "round_box":  { "class": "primitive", "children": [0, 0], "params": { "half": { "type": "vec3", "min": 0.001, "max": 200 }, "radius": { "type": "scalar", "min": 0, "max": 50 } } },
+    "capsule":    { "class": "primitive", "children": [0, 0], "params": { "a": { "type": "vec3", "min": -200, "max": 200 }, "b": { "type": "vec3", "min": -200, "max": 200 }, "radius": { "type": "scalar", "min": 0.001, "max": 100 } } },
+    "cylinder":   { "class": "primitive", "children": [0, 0], "params": { "half_height": { "type": "scalar", "min": 0.001, "max": 200 }, "radius": { "type": "scalar", "min": 0.001, "max": 200 } }, "note": "axis = +Y, centered" },
+    "cone":       { "class": "primitive", "children": [0, 0], "params": { "half_height": { "type": "scalar", "min": 0.001, "max": 200 }, "radius_bottom": { "type": "scalar", "min": 0, "max": 200 }, "radius_top": { "type": "scalar", "min": 0, "max": 200 } }, "note": "capped cone / tapered cylinder, axis = +Y, centered" },
+    "torus":      { "class": "primitive", "children": [0, 0], "params": { "major": { "type": "scalar", "min": 0.001, "max": 200 }, "minor": { "type": "scalar", "min": 0.001, "max": 100 } }, "note": "ring in XZ plane" },
+    "plane":      { "class": "primitive", "children": [0, 0], "params": { "normal": { "type": "vec3", "min": -1, "max": 1 }, "offset": { "type": "scalar", "min": -10000, "max": 10000 } } },
+
+    "union":            { "class": "combine", "children": [2, 8], "params": {} },
+    "intersect":        { "class": "combine", "children": [2, 8], "params": {} },
+    "subtract":         { "class": "combine", "children": [2, 2], "params": {}, "note": "children[0] minus children[1]" },
+    "smooth_union":     { "class": "combine", "children": [2, 8], "params": { "k": { "type": "scalar", "min": 0.001, "max": 50 } } },
+    "smooth_subtract":  { "class": "combine", "children": [2, 2], "params": { "k": { "type": "scalar", "min": 0.001, "max": 50 } } },
+    "smooth_intersect": { "class": "combine", "children": [2, 2], "params": { "k": { "type": "scalar", "min": 0.001, "max": 50 } } },
+
+    "translate": { "class": "domain", "children": [1, 1], "params": { "offset": { "type": "vec3", "min": -10000, "max": 10000 } } },
+    "rotate":    { "class": "domain", "children": [1, 1], "params": { "quat": { "type": "quat" } } },
+    "scale":     { "class": "domain", "children": [1, 1], "params": { "factor": { "type": "scalar", "min": 0.01, "max": 100 } }, "note": "uniform only, distance multiplied by factor (keeps the SDF exact)" },
+    "repeat":    { "class": "domain", "children": [1, 1], "params": { "period": { "type": "vec3", "min": 0.05, "max": 1000 }, "count": { "type": "vec3", "min": 0, "max": 64 } }, "note": "limited domain repetition: cell index clamped to [-count, count] per axis; count 0 disables that axis" },
+    "mirror":    { "class": "domain", "children": [1, 1], "params": { "axis": { "type": "int", "min": 0, "max": 2 } } },
+    "twist":     { "class": "domain", "children": [1, 1], "params": { "rate": { "type": "scalar", "min": -3.2, "max": 3.2 } }, "note": "radians per meter about +Y; non-isometric, step scale 0.6" },
+    "bend":      { "class": "domain", "children": [1, 1], "params": { "rate": { "type": "scalar", "min": -1.0, "max": 1.0 } }, "note": "bend in XY; non-isometric, step scale 0.6" },
+    "warp":      { "class": "domain", "children": [1, 1], "params": { "amplitude": { "type": "scalar", "min": 0, "max": 10 }, "frequency": { "type": "scalar", "min": 0.001, "max": 20 }, "seed": { "type": "int", "min": 0, "max": 65535 } }, "note": "domain offset by vector value-noise; step scale 0.7" },
+
+    "displace": { "class": "field", "children": [1, 1], "params": { "amplitude": { "type": "scalar", "min": 0, "max": 10 }, "frequency": { "type": "scalar", "min": 0.001, "max": 20 }, "octaves": { "type": "int", "min": 1, "max": 5 }, "seed": { "type": "int", "min": 0, "max": 65535 } }, "note": "d + amplitude * fbm(p * frequency); step scale 0.7" },
+    "round":    { "class": "field", "children": [1, 1], "params": { "radius": { "type": "scalar", "min": 0, "max": 50 } } },
+    "shell":    { "class": "field", "children": [1, 1], "params": { "thickness": { "type": "scalar", "min": 0.001, "max": 50 } }, "note": "abs(d) - thickness" }
+  },
+  "noise": {
+    "id": "value-fbm-v1",
+    "hash": "Hoskins hash13 (no sin, stable across GPUs): p3 = fract(p * 0.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y) * p3.z); evaluated at p = lattice point + vec3(seed) * 17.0",
+    "interpolation": "trilinear with quintic fade t*t*t*(t*(t*6-15)+10)",
+    "fbm": "sum_{i<octaves} gain^i * (2*noise(p * lacunarity^i) - 1), lacunarity 2.0 and gain 0.5 unless stated",
+    "tolerance": "implementations (GLSL float32, TS float32 via Math.fround, PyTorch float32) must agree within 1e-3 on golden vectors in tests/golden/noise_v1.json"
+  }
+}

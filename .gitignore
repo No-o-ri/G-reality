@@ -1,0 +1,34 @@
+# secrets
+.env
+.env.*
+!.env.example
+.neon
+*.pem
+
+# node
+node_modules/
+dist/
+.vite/
+.vercel/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# neural assets, model weights, captures (never commit; stored in the local asset cache)
+*.ply
+*.spz
+*.splat
+*.ksplat
+*.pt
+*.pth
+*.safetensors
+.greality-cache/
+captures/
+
+# misc
+.DS_Store
+*.log
