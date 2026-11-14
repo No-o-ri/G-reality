@@ -92,6 +92,7 @@ installation is done by Claude in the main session and Codex only writes and run
 | # | Risk | Likelihood | Impact | Mitigation / trigger |
 |---|------|------------|--------|----------------------|
 | R1 | ~~dGPU unavailable~~ resolved 11:39 PT (Discrete mode; RTX 5070, 8151 MiB, driver 592.82). Residual: CUDA PyTorch not yet installed or run | low | C3 | first step of the neural track: install `torch==2.14.1+cu130`, run a CUDA smoke test; confirm `chrome://gpu` |
+| R0 | **Smart App Control blocks every PyTorch DLL** (and Graphify) on this Windows install | certain | blocks all of C3 | developer picks: WSL2 for the GPU service (recommended), or disable SAC, or browser-side optimizer; see feasibility §3 |
 | R2 | Pure-PyTorch rasterizer too slow or memory-hungry | medium | long regeneration, small regions | measure during C1; tiers in architecture §5.3; reduce region count / far range; pre-bake demo world |
 | R3 | gsplat cannot be built (no CUDA Toolkit, VS 2026) | high | none for baseline | optional accelerator only, 45 min box |
 | R4 | Spark + custom depth pass integration surprises (sorting, color, depth) | low–medium | hybrid visuals | 20-line spike at the start of C3; fallback: region-granular ownership needs only default Spark behaviour |
@@ -101,7 +102,7 @@ installation is done by Claude in the main session and Codex only writes and run
 | R8 | Neon latency makes commands feel slow | low | UX | explicit "committing" state; pooled connection kept warm; measure in C1 |
 | R9 | Schedule: 7 gated chunks in ~22 h with one human | high | incomplete features | cut order in §3; end-to-end loop prioritized over polish |
 | R10 | Chrome LNA prompt / corporate policy blocks HTTPS → localhost at the venue | low–medium | hosted demo | demo from `http://localhost` build, which is exempt |
-| R11 | LLM interpreter needs a paid key or is slow | medium | NL features | `claude-cli` adapter (no key) and `rules` fallback; API key only with approval |
+| R11 | Gemini models intermittently overloaded/slow (observed 503/504 on three flash models; one world request took 46 s through fallbacks) | medium | NL features | model chain with the fast model first (measured ~2 s world, ~1 s command), rules fallback for commands, `GEMINI_MODEL` override |
 | R12 | Lighting baked into splats (time of day cannot change without regeneration) | certain | limitation | documented; environment changes bump all region revisions |
 
 ## 6. What Chunk 1 must prove

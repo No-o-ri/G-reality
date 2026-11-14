@@ -292,11 +292,21 @@ archetype library (conifer, broadleaf, rock, boulder, house, tower, campfire, br
 may add new archetypes as geometry ASTs. Anything it cannot express goes into
 `interpretation_notes` (shown in the UI) or yields a structured `ApiError`.
 
-Interpreter adapters behind one interface: `claude-cli` (local `claude -p` with a JSON schema, no API
-key, local use only), `anthropic` (API key supplied by the developer — a paid external cost that needs
-explicit approval), `rules` (deterministic keyword parser, always available, labelled as such in the
-UI). The same adapters parse interaction commands into `ParsedIntent`; rules are tried first for
-commands because they are instant.
+Interpreter providers behind one interface (`services/world_api/interpreter/`), selected by
+`GREALITY_INTERPRETER`:
+
+- **`gemini` (primary, decided by the developer at the Chunk 0 gate)** — Google Gemini through the
+  official `google-genai` SDK with structured output (`response_schema`). The model fills a small flat
+  `WorldDraft` / `IntentDraft`; `build_spec` clamps every value and constructs the validated
+  `WorldSpec`. Replies are re-validated with Pydantic, unknown fields are dropped, and a draft cannot
+  reference entity ids or state, so the model can neither execute code nor bypass simulation rules.
+  A model chain is tried in order (fast model first); overloaded (503), slow (504/timeout) and retired
+  (404) models are skipped, 429 backs off, 401/403 fails immediately. The key is read from the
+  git-ignored `.env.local` and never logged.
+- **`rules`** — deterministic keyword parser: offline fallback, and the provider used by automated
+  tests. When Gemini fails during a *command*, the service falls back to rules and says so in the
+  player-facing message; world creation surfaces the provider error instead.
+- A local model can be added as a third provider without touching the service.
 
 ## 10. Companion service, security, deployment
 

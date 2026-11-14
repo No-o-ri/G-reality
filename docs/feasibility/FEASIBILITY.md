@@ -80,6 +80,29 @@ same `torch==2.14.1+cu130`. The contracts were already verified on 3.15 with Pyd
 Not yet verified: that `torch.cuda.is_available()` is true and a kernel runs on this GPU — nothing has
 been installed. This is the first step of the neural track (about a 2–3 GB download).
 
+### Smart App Control blocks PyTorch (found 12:00 PT, unresolved)
+
+`torch==2.14.1+cu130` installed into `.venv` on Python 3.15, but `import torch` fails:
+`OSError: [WinError 4551] An Application Control policy has blocked this file … torch\lib\c10.dll`.
+Cause, verified: Windows **Smart App Control is enforcing** (`VerifiedAndReputablePolicyState = 1`), the
+Code Integrity log records events 3077/3118 "Smart App Control Block" for `c10.dll`, and the PyTorch
+DLLs are unsigned (`Get-AuthenticodeSignature` → `NotSigned`). `torch==2.14.0+cu130` is blocked the same
+way (`torch_global_deps.dll`). The same policy is what blocks Graphify's native `_binding` module.
+Everything Chunk 1 needs (psycopg binary, pydantic-core, numpy, FastAPI, google-genai) loads normally.
+
+**Consequence:** no CUDA smoke test could run; `scripts/cuda_smoke.py` is written but unexecuted. No
+PyTorch build can be loaded on this Windows installation while Smart App Control is on, regardless of
+Python version, so the Python 3.12 fallback does not help.
+
+Options (a developer decision; none was taken):
+1. **WSL2 + Ubuntu** for the GPU service (`wsl --install`, admin + restart). Smart App Control does not
+   govern Linux binaries inside WSL, CUDA works there through the Windows NVIDIA driver, and Linux
+   `gsplat` wheels become available. Does not weaken Windows security. Recommended.
+2. Turn Smart App Control off (Windows Security → App & browser control). Simplest, but it is a
+   system-wide security reduction that Windows may not allow re-enabling without a reset.
+3. Move the optimizer into the browser (WebGPU compute or WebGL) — no native code, but a large rewrite
+   of the Chunk 3 plan; last resort.
+
 ## 4. Path A (pretrained feed-forward) vs Path B (optimization from SDF views)
 
 | Criterion | Path A: LGM / MVSplat / DepthSplat / AnySplat-class models | Path B: `3dgs-optim-v1` |

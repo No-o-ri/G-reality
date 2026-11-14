@@ -1,0 +1,13 @@
+{
+  "name": "g-reality",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "contracts": ".venv\\Scripts\\python scripts/gen_contracts.py && json2ts -i packages/contracts/schemas/contracts.schema.json -o packages/contracts/ts/contracts.ts --unreachableDefinitions --no-additionalProperties --bannerComment \"/* GENERATED from contracts.schema.json (source: greality_contracts/models.py). Do not edit. Regenerate: npm run contracts */\"",
+    "contracts:check": ".venv\\Scripts\\python scripts/gen_contracts.py --check && tsc --noEmit --strict --skipLibCheck --target es2022 packages/contracts/ts/contracts.ts"
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "^15.0.0",
+    "typescript": "^5.6.0"
+  }
+}

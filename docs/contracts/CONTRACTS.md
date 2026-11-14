@@ -4,7 +4,7 @@
 `packages/contracts/schemas/geometry_ops.json` (SDF op table). Field-level types, ranges and
 descriptions live there and are not repeated here. Generated artifacts:
 `packages/contracts/schemas/contracts.schema.json` (`python scripts/gen_contracts.py`, `--check` in CI)
-and, from Chunk 1, `packages/contracts/ts/contracts.ts`. Generated files are never edited by hand.
+and `packages/contracts/ts/contracts.ts` (`npm run contracts`; `npm run contracts:check` verifies both). Generated files are never edited by hand.
 
 ## Global rules
 
