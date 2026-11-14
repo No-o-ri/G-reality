@@ -37,3 +37,7 @@ powershell -ExecutionPolicy Bypass -File scripts\start-companion.ps1   # local A
 - `database/migrations/` — numbered SQL migrations
 - `tests/` — unit, persistence (real Neon), integration (HTTP, Gemini)
 - `scripts/` — contract generation, companion start, manual verification, CUDA smoke test
+
+## Acknowledgments
+
+G-reality was built with AI-assisted development. See [CREDITS.md](CREDITS.md).
