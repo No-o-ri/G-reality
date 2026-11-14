@@ -33,7 +33,8 @@ renderer and the training worker together (architecture §11).
 | Runtime loading | `new SplatMesh({ url | fileBytes, fileType })`, also `packedSplats`/`constructSplats`; `dispose()` frees buffers; formats PLY, SPZ, SPLAT, KSPLAT, SOG | [V] docs |
 | Per-splat modification | `objectModifiers` / `worldModifiers` (dyno), `SplatEdit` SDF edits, `opacity`, `recolor` | [V] docs; usage untested |
 | Custom ray-march pass writing `gl_FragDepth` | Core WebGL2 feature; standard three.js `ShaderMaterial` | [K] |
-| Combined: ray-march depth + Spark splats | Expected to work because both use the default framebuffer depth; **not yet run** — first task of Chunk 4, with a 20-line spike in Chunk 3 | [E] |
+| Custom ray-march pass | **Built and measured in Chunk 2**: 1,708 SDF instances at 1280×720 in 4–5 ms GPU time on the RTX 5070; depth written with the camera's projection | [V] |
+| Combined: ray-march depth + Spark splats | The opaque composite quad already writes depth into the shared scene; adding Spark meshes to that scene is **not yet run** — first task of Chunk 3 | [E] |
 | three.js native splat renderer (r186+) | Reported to exist; not evaluated. Spark stays primary because of its documented loading/modifier API | [K] |
 | PlayCanvas / SuperSplat | Capable engine, but SuperSplat is an editor, and adopting PlayCanvas means writing the SDF pipeline inside a second engine model; no advantage for this design | [K] |
 | Vercel | Vite static output; no server functions required | [K] |
@@ -94,7 +95,13 @@ Everything Chunk 1 needs (psycopg binary, pydantic-core, numpy, FastAPI, google-
 PyTorch build can be loaded on this Windows installation while Smart App Control is on, regardless of
 Python version, so the Python 3.12 fallback does not help.
 
-Options (a developer decision; none was taken):
+**Update 12:45 PT:** the developer installed Ubuntu under WSL2 and verified `torch 2.14.1+cu130`,
+`torch.cuda.is_available() == True` and a CUDA matrix multiplication on the RTX 5070 there
+(`/home/sidno/greality-gpu/.venv`). Option 1 below is therefore the chosen path: CUDA-dependent Python
+runs in WSL2; the Windows Python environment stays as it is. Not yet re-verified from this repository's
+tooling (first step of Chunk 3).
+
+Options considered:
 1. **WSL2 + Ubuntu** for the GPU service (`wsl --install`, admin + restart). Smart App Control does not
    govern Linux binaries inside WSL, CUDA works there through the Windows NVIDIA driver, and Linux
    `gsplat` wheels become available. Does not weaken Windows security. Recommended.

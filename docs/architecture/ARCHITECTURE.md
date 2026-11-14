@@ -93,7 +93,13 @@ Model output is never compiled or executed directly: it is parsed as JSON, valid
 | AST → TS closure (float32) | `apps/web/src/rendering/nearfield/cpu` | player collision / ground height, picking, unit tests |
 | Terrain + bounds in Python | `services/world_api/regions` | deterministic placement, mutation bounds |
 
-All three are tested against shared golden vectors (`tests/golden/*.json`, tolerance 1e-3).
+All three are tested against shared golden vectors (`tests/golden/*.json`, tolerance 1e-3), and the
+renderer measures GPU↔CPU terrain agreement at start-up (shown in the diagnostics overlay).
+
+The terrain lattice hash is a 32-bit **integer** hash (`h = x·374761393 + y·668265263; h = (h ^ h>>13)·1274126177; h ^= h>>16; value = (h>>8)/2²⁴`),
+bit-identical in GLSL `uint`, Python and TypeScript. A float hash was tried first and produced a 150 mm
+GPU↔CPU mismatch because it amplifies 1-ulp rounding differences; with the integer hash the measured
+mismatch is 0.009 mm. This change is `GENERATOR_VERSION = 2`.
 
 ### 4.3 Renderer
 - Full-screen triangle, fragment shader sphere-traces from the camera.
@@ -102,8 +108,8 @@ All three are tested against shared golden vectors (`tests/golden/*.json`, toler
 - **Instances are data, not code**: an RGBA32F instance texture holds position, yaw/quaternion, scale,
   archetype id, bound radius and 4 state-driven params per entity. A mutation rewrites one row; the shader
   is not recompiled.
-- **Acceleration**: a 2D uniform grid over XZ (4 m cells, R32UI index texture + packed index list) covering
-  the near field. Per march step the shader evaluates terrain analytically and only the instances
+- **Acceleration**: a 2D uniform grid over XZ (8 m cells, 16 instance slots per cell in an RGBA32F
+  texture) covering the loaded regions. Per march step the shader evaluates terrain analytically and only the instances
   registered in the current cell; the step is clamped to the cell exit distance so nothing is skipped.
   Instances are first tested against their bounding sphere.
 - Normals by tetrahedral finite differences; soft shadows (32 steps, sun only); height fog; ambient + sky

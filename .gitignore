@@ -32,3 +32,4 @@ captures/
 # misc
 .DS_Store
 *.log
+visual-out/

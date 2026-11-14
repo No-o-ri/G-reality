@@ -3,7 +3,9 @@
 All arithmetic is float32 so the GLSL and TypeScript evaluators (Chunk 2) can reproduce it within the
 golden-vector tolerance. Formula (also the specification):
 
-    hash12(p):  p3 = fract(p.xyx * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z)
+    hash12(i):  32-bit integer hash of the lattice cell (exact on GPU, Python and TypeScript):
+                h = i.x * 374761393 + i.y * 668265263; h = (h ^ (h >> 13)) * 1274126177; h ^= h >> 16
+                return (h >> 8) / 2^24
     vnoise(p):  bilinear interpolation of hash12 on the integer lattice (offset by the seed), quintic fade
     field(p):   sum over octaves i of a_i * s_i, a_i = 0.5^i, sample point p * 2^i + 17 * i
                 smooth s = 2n - 1, ridged s = 1 - 2 * |2n - 1|, blended by `ridge`, normalised by sum(a_i)
@@ -22,8 +24,6 @@ import numpy as np
 from greality_contracts import TerrainDefinition
 
 F = np.float32
-_K = F(0.1031)
-_S = F(33.33)
 
 
 def _fract(x: np.float32) -> np.float32:
@@ -31,11 +31,11 @@ def _fract(x: np.float32) -> np.float32:
 
 
 def hash12(x: float, y: float) -> np.float32:
-    x, y = F(x), F(y)
-    ax, ay, az = _fract(x * _K), _fract(y * _K), _fract(x * _K)
-    d = F(ax * (ay + _S) + ay * (az + _S) + az * (ax + _S))
-    ax, ay, az = F(ax + d), F(ay + d), F(az + d)
-    return _fract(F(ax + ay) * az)
+    """Hash of an integer lattice cell (x and y must be whole numbers)."""
+    h = (int(x) * 374761393 + int(y) * 668265263) & 0xFFFFFFFF
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
+    h ^= h >> 16
+    return F((h >> 8) / 16777216.0)
 
 
 def seed_offset(seed: int) -> tuple[float, float]:
@@ -49,9 +49,9 @@ def vnoise(x: float, y: float, seed: int) -> np.float32:
     ux = F(fx * fx * fx * (fx * (fx * F(6) - F(15)) + F(10)))
     uy = F(fy * fy * fy * (fy * (fy * F(6) - F(15)) + F(10)))
     sx, sy = seed_offset(seed)
-    lx, ly = F(ix + F(sx)), F(iy + F(sy))
-    a, b = hash12(lx, ly), hash12(lx + F(1), ly)
-    c, d = hash12(lx, ly + F(1)), hash12(lx + F(1), ly + F(1))
+    lx, ly = int(ix) + int(sx), int(iy) + int(sy)
+    a, b = hash12(lx, ly), hash12(lx + 1, ly)
+    c, d = hash12(lx, ly + 1), hash12(lx + 1, ly + 1)
     top = F(a + (b - a) * ux)
     bottom = F(c + (d - c) * ux)
     return F(top + (bottom - top) * uy)

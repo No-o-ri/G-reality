@@ -21,7 +21,14 @@ from greality_contracts import (
 from .archetypes import library
 from .terrain import stable_unit, terrain_height, terrain_slope
 
-GENERATOR_VERSION = 1
+# Generator versions. A world keeps the version it was created with, and generation for that world always
+# follows that version's rules, so stored regions, new regions and event replay stay consistent.
+#   1: original (float lattice hash). Entity heights do not match the current terrain; hidden by the client.
+#   2: exact integer lattice hash (Chunk 2).
+#   3: buildings are kept clear of scattered objects, and discrete placements retry nearby when the first
+#      spot is too steep or under water (Chunk 2 QA).
+GENERATOR_VERSION = 3
+MIN_RENDERABLE_GENERATOR_VERSION = 2
 MAX_ENTITIES_PER_REGION = 400
 
 
@@ -89,26 +96,76 @@ def _entity(world_id: str, seed: int, f: FeatureSpec, tag: str, x: float, h: flo
     )
 
 
-def generate_region(world_id: str, spec: WorldSpec, seed: int, coord: RegionCoord) -> list[WorldEntity]:
+# Rough horizontal extent as a fraction of an archetype's bounding radius (which is a tall sphere).
+_DISCRETE_FOOTPRINT = 0.55
+_SCATTER_FOOTPRINT = 0.3
+_RETRIES = 12
+
+
+def _discrete_spot(spec: WorldSpec, seed: int, f: FeatureSpec, i: int, version: int) -> tuple[float, float, float] | None:
+    """Position of the i-th discrete placement of a feature, or None if no acceptable ground was found."""
+    cx, cz = f.center or (0.0, 0.0)
+    radius = f.radius or 40.0
+    r = radius * math.sqrt((i + 0.5) / f.count) * 0.9
+    a = i * 2.399963 + 2.0 * math.pi * stable_unit(seed, f.id, "spin")
+    x, z = cx + r * math.cos(a), cz + r * math.sin(a)
+    h = _accept(spec, seed, f, x, z)
+    if h is not None or version < 3:
+        return (x, h, z) if h is not None else None
+    step = max(4.0, radius / max(1.0, math.sqrt(f.count)) * 0.5)
+    for k in range(_RETRIES):
+        ang = 2.0 * math.pi * stable_unit(seed, f.id, i, "retry-a", k)
+        dist = step * (0.4 + 0.6 * stable_unit(seed, f.id, i, "retry-d", k)) * (1 + k // 4)
+        nx, nz = x + dist * math.cos(ang), z + dist * math.sin(ang)
+        h = _accept(spec, seed, f, nx, nz)
+        if h is not None:
+            return nx, h, nz
+    return None
+
+
+_DISCRETE_CACHE: dict[tuple, list[tuple[FeatureSpec, int, float, float, float]]] = {}
+
+
+def discrete_placements(spec: WorldSpec, seed: int, version: int) -> list[tuple[FeatureSpec, int, float, float, float]]:
+    """All discrete placements of a world as (feature, index, x, height, z). Deterministic; cached per world."""
+    key = (seed, version, hash(spec.model_dump_json()))
+    cached = _DISCRETE_CACHE.get(key)
+    if cached is None:
+        cached = []
+        for f in spec.features:
+            for i in range(f.count):
+                spot = _discrete_spot(spec, seed, f, i, version)
+                if spot is not None:
+                    cached.append((f, i, *spot))
+        if len(_DISCRETE_CACHE) > 64:
+            _DISCRETE_CACHE.clear()
+        _DISCRETE_CACHE[key] = cached
+    return cached
+
+
+def _bound(geometry_id: str) -> float:
+    archetype = library().get(geometry_id)
+    return archetype.bound_radius if archetype else 5.0
+
+
+def generate_region(world_id: str, spec: WorldSpec, seed: int, coord: RegionCoord,
+                    generator_version: int = GENERATOR_VERSION) -> list[WorldEntity]:
     x0, z0, x1, z1 = region_bounds(coord)
     out: list[WorldEntity] = []
+    placed = discrete_placements(spec, seed, generator_version)
+    for f, i, x, h, z in placed:
+        if x0 <= x < x1 and z0 <= z < z1:
+            out.append(_entity(world_id, seed, f, f"n{i}", x, h, z))
+    # From version 3, scattered objects keep clear of discrete ones (no trees growing through houses).
+    keep_clear = [
+        (x, z, _bound(f.geometry_id) * _DISCRETE_FOOTPRINT * f.scale_range[1])
+        for f, _, x, _, z in placed
+        if x0 - 40.0 <= x < x1 + 40.0 and z0 - 40.0 <= z < z1 + 40.0
+    ] if generator_version >= 3 else []
     for f in spec.features:
-        if f.count > 0:
-            # Discrete placements: golden-angle spiral around the feature center, jittered deterministically.
-            cx, cz = f.center or (0.0, 0.0)
-            radius = f.radius or 40.0
-            for i in range(f.count):
-                r = radius * math.sqrt((i + 0.5) / f.count) * 0.9
-                a = i * 2.399963 + 2.0 * math.pi * stable_unit(seed, f.id, "spin")
-                x, z = cx + r * math.cos(a), cz + r * math.sin(a)
-                if not (x0 <= x < x1 and z0 <= z < z1):
-                    continue
-                h = _accept(spec, seed, f, x, z)
-                if h is not None:
-                    out.append(_entity(world_id, seed, f, f"n{i}", x, h, z))
+        if f.count > 0 or f.density_per_ha <= 0.0:
             continue
-        if f.density_per_ha <= 0.0:
-            continue
+        own = _bound(f.geometry_id) * _SCATTER_FOOTPRINT * f.scale_range[1]
         spacing = math.sqrt(10000.0 / f.density_per_ha)
         gx0, gx1 = math.floor(x0 / spacing), math.floor(x1 / spacing)
         gz0, gz1 = math.floor(z0 / spacing), math.floor(z1 / spacing)
@@ -117,6 +174,8 @@ def generate_region(world_id: str, spec: WorldSpec, seed: int, coord: RegionCoor
                 x = (gx + 0.15 + 0.7 * stable_unit(seed, f.id, gx, gz, "x")) * spacing
                 z = (gz + 0.15 + 0.7 * stable_unit(seed, f.id, gx, gz, "z")) * spacing
                 if not (x0 <= x < x1 and z0 <= z < z1):
+                    continue
+                if any(math.hypot(x - bx, z - bz) < br + own for bx, bz, br in keep_clear):
                     continue
                 h = _accept(spec, seed, f, x, z)
                 if h is not None:

@@ -18,9 +18,11 @@ def main() -> None:
     settings = get_settings()
     app = create_app(settings, token=os.environ.get("GREALITY_TOKEN") or None)
     base = f"http://{settings.bind_host}:{settings.port}"
-    print(f"G-reality companion on {base}  (interpreter: {settings.interpreter})")
-    print(f"pairing token: {app.state.pairing_token}")
-    print(f"allowed origins: {', '.join(settings.allowed_origins)}")
+    print(f"G-reality companion on {base}  (interpreter: {settings.interpreter})", flush=True)
+    print(f"pairing token: {app.state.pairing_token}", flush=True)
+    print(f"allowed origins: {', '.join(settings.allowed_origins)}", flush=True)
+    for origin in settings.allowed_origins:
+        print(f"open: {origin}/#companion={base}&token={app.state.pairing_token}", flush=True)
     uvicorn.run(app, host=settings.bind_host, port=settings.port, log_level="warning")
 
 

@@ -24,13 +24,15 @@ def _at(y: float, node: dict, x: float = 0.0, z: float = 0.0) -> dict:
 _RAW: list[dict] = [
     {
         "id": "tree.conifer",
+        "version": 2,
         "bound_radius": 9.0,
         "parameters": {"canopy": {"default": 1.8, "min": 0.0, "max": 3.0}, "burn": _BURN},
         "materials": [_mat("bark", (0.24, 0.16, 0.10)), _mat("needles", (0.07, 0.22, 0.10), variation=0.3)],
         "root": {
             "op": "union", "params": {}, "children": [
-                _at(2.0, {"op": "cone", "material": "bark",
-                          "params": {"half_height": 2.0, "radius_bottom": 0.28, "radius_top": 0.14}}),
+                # trunk reaches 0.8 m below the base so it stays rooted on steep ground
+                _at(1.6, {"op": "cone", "material": "bark",
+                          "params": {"half_height": 2.4, "radius_bottom": 0.3, "radius_top": 0.14}}),
                 _at(4.2, {"op": "cone", "material": "needles",
                           "params": {"half_height": 1.6, "radius_bottom": {"ref": "canopy"}, "radius_top": 0.25}}),
                 _at(6.3, {"op": "cone", "material": "needles",
@@ -40,13 +42,14 @@ _RAW: list[dict] = [
     },
     {
         "id": "tree.broadleaf",
+        "version": 2,
         "bound_radius": 8.0,
         "parameters": {"canopy": {"default": 2.4, "min": 0.0, "max": 4.0}, "burn": _BURN},
         "materials": [_mat("bark", (0.30, 0.22, 0.14)), _mat("leaves", (0.16, 0.36, 0.10), variation=0.35)],
         "root": {
             "op": "smooth_union", "params": {"k": 0.4}, "children": [
                 {"op": "capsule", "material": "bark",
-                 "params": {"a": [0, 0, 0], "b": [0, 3.4, 0], "radius": 0.26}},
+                 "params": {"a": [0, -0.8, 0], "b": [0, 3.4, 0], "radius": 0.26}},
                 _at(4.6, {"op": "displace", "material": "leaves",
                           "params": {"amplitude": 0.35, "frequency": 1.3, "octaves": 3, "seed": 11},
                           "children": [{"op": "sphere", "params": {"radius": {"ref": "canopy"}}}]}),
@@ -64,13 +67,15 @@ _RAW: list[dict] = [
     },
     {
         "id": "building.house",
+        "version": 2,
         "bound_radius": 6.5,
         "parameters": {"burn": _BURN},
         "materials": [_mat("wall", (0.72, 0.66, 0.55), variation=0.08), _mat("roof", (0.45, 0.17, 0.12))],
         "root": {
             "op": "union", "params": {}, "children": [
                 {"op": "subtract", "material": "wall", "params": {}, "children": [
-                    _at(1.4, {"op": "box", "params": {"half": [2.6, 1.4, 2.0]}}),
+                    # walls continue 2 m below the floor as a foundation, hidden by the terrain on level ground
+                    _at(0.4, {"op": "box", "params": {"half": [2.6, 2.4, 2.0]}}),
                     _at(0.95, {"op": "box", "params": {"half": [0.5, 0.95, 0.3]}}, z=2.0),
                 ]},
                 _at(3.5, {"op": "intersect", "material": "roof", "params": {}, "children": [

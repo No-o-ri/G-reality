@@ -92,12 +92,12 @@ installation is done by Claude in the main session and Codex only writes and run
 | # | Risk | Likelihood | Impact | Mitigation / trigger |
 |---|------|------------|--------|----------------------|
 | R1 | ~~dGPU unavailable~~ resolved 11:39 PT (Discrete mode; RTX 5070, 8151 MiB, driver 592.82). Residual: CUDA PyTorch not yet installed or run | low | C3 | first step of the neural track: install `torch==2.14.1+cu130`, run a CUDA smoke test; confirm `chrome://gpu` |
-| R0 | **Smart App Control blocks every PyTorch DLL** (and Graphify) on this Windows install | certain | blocks all of C3 | developer picks: WSL2 for the GPU service (recommended), or disable SAC, or browser-side optimizer; see feasibility §3 |
+| R0 | Smart App Control blocks every PyTorch DLL (and Graphify) on Windows. **Mitigated:** developer verified CUDA PyTorch in WSL2; the GPU service will run there | resolved for torch | C3 must bridge Windows browser ↔ WSL service (localhost forwarding) | verify from repo tooling at the start of C3 |
 | R2 | Pure-PyTorch rasterizer too slow or memory-hungry | medium | long regeneration, small regions | measure during C1; tiers in architecture §5.3; reduce region count / far range; pre-bake demo world |
 | R3 | gsplat cannot be built (no CUDA Toolkit, VS 2026) | high | none for baseline | optional accelerator only, 45 min box |
 | R4 | Spark + custom depth pass integration surprises (sorting, color, depth) | low–medium | hybrid visuals | 20-line spike at the start of C3; fallback: region-granular ownership needs only default Spark behaviour |
 | R5 | Splats trained from 28 views look poor from the player's distance/angle | medium | visual quality | cameras placed along plausible player sightlines; fog; raise iterations for demo regions |
-| R6 | SDF shader too slow with many instances | medium | FPS | grid acceleration, bound tests, step budgets, internal resolution; instance cap per cell |
+| R6 | SDF shader too slow with many instances — **measured in Chunk 2: 4–5 ms at 720p internal, 7 ms at 900p for 1,708 instances** | low | FPS | grid acceleration, bound tests, step budgets, internal resolution; untested on weaker GPUs and high-relief worlds |
 | R7 | Three evaluators of noise/terrain diverge | medium | misplaced entities, floating trees | golden vectors from C2; sin-free hash |
 | R8 | Neon latency makes commands feel slow | low | UX | explicit "committing" state; pooled connection kept warm; measure in C1 |
 | R9 | Schedule: 7 gated chunks in ~22 h with one human | high | incomplete features | cut order in §3; end-to-end loop prioritized over polish |

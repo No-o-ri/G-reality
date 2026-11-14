@@ -185,7 +185,8 @@ class WorldService:
         with self.pool.connection() as conn:
             cur = conn.cursor(row_factory=dict_row)
             return cur.execute(
-                "SELECT world_id, name, seed, revision, status, created_at, updated_at FROM worlds ORDER BY created_at DESC"
+                """SELECT world_id, name, seed, revision, status, generator_version, created_at, updated_at
+                   FROM worlds ORDER BY created_at DESC"""
             ).fetchall()
 
     def delete_world(self, world_id: str) -> None:
@@ -215,37 +216,47 @@ class WorldService:
             if w is None:
                 raise NotFound(f"world {world_id} does not exist")
             spec = WorldSpec.model_validate(w["spec"])
+            # Set-based: a fixed number of round trips regardless of how many regions are requested.
+            xs, zs = [c.rx for c in coords], [c.rz for c in coords]
+            pairs = "(rx, rz) IN (SELECT * FROM unnest(%s::int[], %s::int[]))"
+            cur.execute(
+                """INSERT INTO world_regions (world_id, rx, rz, generator_version)
+                   SELECT %s, t.x, t.z, %s FROM unnest(%s::int[], %s::int[]) AS t(x, z)
+                   ON CONFLICT DO NOTHING""", (world_id, w["generator_version"], xs, zs))
+            regions = {(r["rx"], r["rz"]): r for r in cur.execute(
+                f"SELECT * FROM world_regions WHERE world_id=%s AND {pairs} ORDER BY rx, rz FOR UPDATE",
+                (world_id, xs, zs)).fetchall()}
+            fresh = [c for c in coords if not regions[(c.rx, c.rz)]["materialized"]]
+            if fresh:
+                generated = [e for c in fresh
+                             for e in generate_region(world_id, spec, w["seed"], c, w["generator_version"])]
+                if generated:
+                    cur.executemany(_ENTITY_INSERT + " ON CONFLICT DO NOTHING", [_entity_params(e) for e in generated])
+                cur.execute(f"UPDATE world_regions SET materialized = true WHERE world_id=%s AND {pairs}",
+                            (world_id, [c.rx for c in fresh], [c.rz for c in fresh]))
+            by_region: dict[tuple[int, int], list[WorldEntity]] = {(c.rx, c.rz): [] for c in coords}
+            for row in cur.execute(f"SELECT * FROM entities WHERE world_id=%s AND {pairs} ORDER BY entity_id",
+                                   (world_id, xs, zs)).fetchall():
+                by_region[(row["rx"], row["rz"])].append(_entity_from_row(row))
+            assets = {(r["rx"], r["rz"]): r for r in cur.execute(
+                f"""SELECT rx, rz, region_revision, manifest FROM neural_assets
+                    WHERE world_id=%s AND state='active' AND {pairs}""", (world_id, xs, zs)).fetchall()}
+            jobs = {(r["rx"], r["rz"]): r for r in cur.execute(
+                f"SELECT * FROM neural_jobs WHERE world_id=%s AND state = ANY(%s) AND {pairs}",
+                (world_id, list(LIVE_JOB_STATES), xs, zs)).fetchall()}
             for c in coords:
-                cur.execute(
-                    """INSERT INTO world_regions (world_id, rx, rz, generator_version) VALUES (%s,%s,%s,%s)
-                       ON CONFLICT DO NOTHING""", (world_id, c.rx, c.rz, w["generator_version"]))
-                r = cur.execute("SELECT * FROM world_regions WHERE world_id=%s AND rx=%s AND rz=%s FOR UPDATE",
-                                (world_id, c.rx, c.rz)).fetchone()
-                if not r["materialized"]:
-                    generated = generate_region(world_id, spec, w["seed"], c)
-                    if generated:
-                        cur.executemany(_ENTITY_INSERT + " ON CONFLICT DO NOTHING",
-                                        [_entity_params(e) for e in generated])
-                    cur.execute("UPDATE world_regions SET materialized = true WHERE world_id=%s AND rx=%s AND rz=%s",
-                                (world_id, c.rx, c.rz))
-                    r["materialized"] = True
-                rows = cur.execute(
-                    "SELECT * FROM entities WHERE world_id=%s AND rx=%s AND rz=%s ORDER BY entity_id",
-                    (world_id, c.rx, c.rz)).fetchall()
+                key = (c.rx, c.rz)
+                r = regions[key]
+                a = assets.get(key)
                 # An asset is only ever returned if it was built from exactly the current region revision.
-                a = cur.execute(
-                    """SELECT manifest FROM neural_assets WHERE world_id=%s AND rx=%s AND rz=%s
-                       AND state='active' AND region_revision=%s""", (world_id, c.rx, c.rz, r["revision"])).fetchone()
-                j = cur.execute(
-                    "SELECT * FROM neural_jobs WHERE world_id=%s AND rx=%s AND rz=%s AND state = ANY(%s)",
-                    (world_id, c.rx, c.rz, list(LIVE_JOB_STATES))).fetchone()
+                current = a is not None and a["region_revision"] == r["revision"]
                 out.append(RegionSnapshot(
                     region=WorldRegion(world_id=world_id, coord=c, revision=r["revision"], materialized=True,
                                        generator_version=r["generator_version"], smoke_density=r["smoke_density"],
                                        hazard_level=r["hazard_level"]),
-                    entities=[_entity_from_row(x) for x in rows],
-                    neural_asset=a["manifest"] if a else None,
-                    pending_job=_job_from_row(j) if j else None,
+                    entities=by_region[key],
+                    neural_asset=a["manifest"] if current else None,
+                    pending_job=_job_from_row(jobs[key]) if key in jobs else None,
                 ))
         return out
 
@@ -554,7 +565,8 @@ class WorldService:
                                   (world_id,)).fetchall()
         state: dict[str, WorldEntity] = {}
         for r in regions:
-            for e in generate_region(world_id, world.spec, world.seed, RegionCoord(rx=r["rx"], rz=r["rz"])):
+            for e in generate_region(world_id, world.spec, world.seed, RegionCoord(rx=r["rx"], rz=r["rz"]),
+                                     world.generator_version):
                 state[e.id] = e
         for event in self.events(world_id, 0, 1000):
             for entity_id, doc in (event.payload.get("entities") or {}).items():

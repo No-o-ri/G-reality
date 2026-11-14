@@ -148,7 +148,8 @@ def build_spec(draft: WorldDraft, prompt: str, seed: int) -> WorldSpec:
             radius=radius,
             min_height=min_h,
             max_height=max_h,
-            max_slope=0.9 if profile["kind"] == "tree" else 0.5,
+            # buildings need near-level ground (their foundation hides the rest); props and rocks tolerate more
+            max_slope=0.9 if profile["kind"] == "tree" else 0.22 if profile["kind"] == "house" else 0.5,
             scale_range=(0.8, 1.3) if scattered else (0.95, 1.1),
             capabilities=profile["capabilities"],
             initial_state=EntityState(**profile["state"]),
