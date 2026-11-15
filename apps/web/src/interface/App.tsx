@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GeometryDefinition, WorldEntity } from "@contracts";
-import { ApiFailure, Companion, MIN_RENDERABLE_GENERATOR_VERSION, loadOfflineSample, readPairing, type WorldSummary } from "../app/api";
+import { ApiFailure, Companion, MIN_RENDERABLE_GENERATOR_VERSION, isPublicSite, loadOfflineSample, readPairing, type WorldSummary } from "../app/api";
 import { Engine, type EngineStatus } from "../app/Engine";
 import { DEBUG_VIEWS, type DebugView, type QualityName } from "../rendering/hybrid/types";
 import { GAUSSIAN_MODES, type GaussianMode } from "../rendering/farfield/GaussianDiagnostic";
@@ -10,6 +10,7 @@ import { Hud, type Toast } from "./Hud";
 import * as THREE from "three";
 
 type Backend =
+  | { state: "public" }
   | { state: "checking" }
   | { state: "connected"; database: string; contract: string }
   | { state: "unauthorized" }
@@ -31,7 +32,8 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<Engine | null>(null);
   const companion = useMemo(() => new Companion(readPairing()), []);
-  const [backend, setBackend] = useState<Backend>({ state: "checking" });
+  const publicSite = useMemo(() => isPublicSite(companion.pairing), [companion]);
+  const [backend, setBackend] = useState<Backend>(publicSite ? { state: "public" } : { state: "checking" });
   const [worlds, setWorlds] = useState<WorldSummary[]>([]);
   const [status, setStatus] = useState<EngineStatus | null>(null);
   const [source, setSource] = useState<"none" | "live" | "offline">("none");
@@ -141,6 +143,7 @@ export function App() {
   );
 
   const refreshBackend = useCallback(async () => {
+    if (publicSite) return null; // public website: sample only, never probe the loopback companion
     try {
       const health = await companion.health();
       try {
@@ -158,7 +161,7 @@ export function App() {
       setBackend({ state: "unreachable", message: (e as Error).message });
     }
     return null;
-  }, [companion]);
+  }, [companion, publicSite]);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -375,6 +378,7 @@ export function App() {
       {devMode && <div className="topbar">
         <span className="brand">G-reality</span>
         <span className={`chip ${backend.state}`}>
+          {backend.state === "public" && "companion: none (public website)"}
           {backend.state === "checking" && "companion: checking…"}
           {backend.state === "connected" && `companion: connected · Neon ${backend.database}`}
           {backend.state === "unauthorized" && "companion: needs pairing token"}

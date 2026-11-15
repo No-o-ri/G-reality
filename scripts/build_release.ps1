@@ -26,7 +26,7 @@ try {
     Copy-Tree (Join-Path $root 'packaging\launcher') (Join-Path $stage 'launcher')
     New-Item -ItemType Directory -Path (Join-Path $stage 'app') -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $root 'packaging\requirements-runtime.txt') -Destination (Join-Path $stage 'app\requirements.txt')
-    foreach ($path in @('services\world_api','services\gpu','packages\contracts\python','packages\contracts\schemas')) { Copy-Tree (Join-Path $root $path) (Join-Path $stage "app\$path") }
+    foreach ($path in @('services\world_api','services\gpu','packages\contracts\python','packages\contracts\schemas','database\migrations')) { Copy-Tree (Join-Path $root $path) (Join-Path $stage "app\$path") }
     New-Item -ItemType Directory -Path (Join-Path $stage 'app\scripts') -Force | Out-Null
     foreach ($name in @('wsl-gpu.sh','chunk3_reconstruct.py')) {
         $source = Join-Path $root "scripts\$name"
@@ -53,7 +53,21 @@ try {
         $content = [IO.File]::ReadAllText($file.FullName)
         if ($content -cmatch 'DATABASE_URL=postgres|npg_|AIza[0-9A-Za-z_\-]{20,}') { throw "Secret scan failed in $($file.FullName). Contents suppressed." }
     }
-    Write-Host 'Secret scan PASS.'
+    # Also fail if any non-trivial value from the developer's own secrets files appears anywhere in the release.
+    $values = @()
+    foreach ($envPath in @((Join-Path $root '.env.local'), (Join-Path $root '.env'))) {
+        if (-not (Test-Path -LiteralPath $envPath)) { continue }
+        foreach ($line in [IO.File]::ReadAllLines($envPath)) {
+            if ($line -notmatch '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[''"]?(.*?)[''"]?\s*$') { continue }
+            $key = $Matches[1]; $value = $Matches[2]  # copy before the next -match overwrites $Matches
+            if ($key -match 'URL|KEY|TOKEN|SECRET|PASSWORD' -and $value.Length -ge 12 -and $value -notmatch '^https?://(127\.0\.0\.1|localhost)') { $values += $value }
+        }
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $stage -Recurse -File -Force) {
+        $content = [IO.File]::ReadAllText($file.FullName)
+        foreach ($value in $values) { if ($content.Contains($value)) { throw "Secret scan failed: a value from .env.local appears in $($file.FullName). Contents suppressed." } }
+    }
+    Write-Host "Secret scan PASS ($($values.Count) local secret values checked)."
     $zip = Join-Path $OutDir 'G-reality-win64.zip'
     if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
     Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip

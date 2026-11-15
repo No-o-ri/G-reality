@@ -64,6 +64,20 @@ function defaultUrl(): string {
   return (import.meta.env.VITE_COMPANION_URL as string | undefined) ?? "http://127.0.0.1:8765";
 }
 
+/** Windows companion download (override with VITE_DOWNLOAD_URL at build time). */
+export const DOWNLOAD_URL =
+  (import.meta.env.VITE_DOWNLOAD_URL as string | undefined) || "https://github.com/No-o-ri/G-reality/releases/latest/download/G-reality-win64.zip";
+
+/**
+ * Public static deployment (Vercel): the page is neither served from loopback (companion release, Vite dev) nor paired
+ * with a companion. It then never probes the loopback companion (browsers ask for local-network permission) and offers
+ * the read-only sample world and the Windows download instead.
+ */
+export function isPublicSite(pairing: Pairing): boolean {
+  const host = window.location.hostname;
+  return !pairing.token && !["localhost", "127.0.0.1", "[::1]", "::1"].includes(host);
+}
+
 export class Companion {
   constructor(readonly pairing: Pairing) {}
 

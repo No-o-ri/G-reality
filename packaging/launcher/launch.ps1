@@ -53,6 +53,11 @@ function Invoke-Wsl([string[]]$Arguments, [int]$TimeoutMs) {
         return @{ Code = $process.ExitCode; Output = $stdout.GetAwaiter().GetResult().Replace([string][char]0, '') }
     } finally { $process.Dispose() }
 }
+function Read-Secret([string]$Prompt) {
+    $secure = Read-Host -Prompt $Prompt -AsSecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+}
 function Set-LaunchEnvironment([string]$Name, [string]$Value) {
     $savedEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name, 'Process')
     [Environment]::SetEnvironmentVariable($Name, $Value, 'Process')
@@ -65,21 +70,36 @@ try {
     Start-Transcript -Path ($logBase + '.log') | Out-Null
     $transcribing = $true
     Write-Host 'G-reality preflight'
-    $python = $null
-    $pythonPrefix = @()
-    foreach ($candidate in @('py','python')) {
-        if (-not (Get-Command $candidate -ErrorAction SilentlyContinue)) { continue }
-        $prefix = @()
-        if ($candidate -eq 'py') { $prefix = @('-3') }
-        try {
-            $versionText = (& $candidate @prefix --version 2>&1 | Out-String)
-            if ($LASTEXITCODE -eq 0 -and $versionText -match 'Python\s+(\d+)\.(\d+)\.(\d+)') {
-                $version = [version]($Matches[1] + '.' + $Matches[2] + '.' + $Matches[3])
-                if ($version -ge [version]'3.12.0') { $python = (Get-Command $candidate).Source; $pythonPrefix = $prefix; Check 'ok' "Python $version"; break }
-            }
-        } catch { }
+    # PATH candidates, then the per-user python.org install locations (PATH is not refreshed after a winget install).
+    function Find-Python {
+        $candidates = @('py','python') + @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Programs\Python') -Filter python.exe -Recurse -Depth 1 -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object { $_.FullName })
+        foreach ($candidate in $candidates) {
+            $command = Get-Command $candidate -ErrorAction SilentlyContinue
+            if (-not $command) { continue }
+            $prefix = @()
+            if ($candidate -eq 'py') { $prefix = @('-3') }
+            try {
+                $versionText = (& $command.Source @prefix --version 2>&1 | Out-String)
+                if ($LASTEXITCODE -eq 0 -and $versionText -match 'Python\s+(\d+)\.(\d+)\.(\d+)') {
+                    $version = [version]($Matches[1] + '.' + $Matches[2] + '.' + $Matches[3])
+                    if ($version -ge [version]'3.12.0') { return @{ Path = $command.Source; Prefix = $prefix; Version = $version } }
+                }
+            } catch { }
+        }
+        return $null
     }
-    if (-not $python) { Check '!!' 'Python 3.12+ required. Install from https://www.python.org/downloads/windows/ and enable the launcher or PATH.'; throw 'Python requirement failed.' }
+    $found = Find-Python
+    if (-not $found -and -not ($SmokeTest -or $PreflightOnly) -and (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+        Check '--' 'Python 3.12+ was not found. G-reality can install the official, signed Python 3.12 from python.org with winget (per user, no administrator rights).'
+        if ((Read-Host 'Install Python 3.12 now? [Y/n]') -notmatch '^\s*[nN]') {
+            & winget.exe install --exact --id Python.Python.3.12 --scope user --silent --accept-package-agreements --accept-source-agreements
+            $found = Find-Python
+        }
+    }
+    if (-not $found) { Check '!!' 'Python 3.12+ required. Install from https://www.python.org/downloads/windows/ and enable the launcher or PATH.'; throw 'Python requirement failed.' }
+    $python = $found.Path
+    $pythonPrefix = $found.Prefix
+    Check 'ok' "Python $($found.Version)"
     if ($EnvFile) {
         if (-not (Test-Path -LiteralPath $EnvFile -PathType Leaf)) { Check '!!' 'The specified secrets file does not exist.'; throw 'Secrets file missing.' }
         $chosenEnv = (Resolve-Path -LiteralPath $EnvFile).Path
@@ -88,6 +108,25 @@ try {
         foreach ($path in @((Join-Path $releaseRoot '.env.local'), (Join-Path $env:APPDATA 'G-reality\.env.local'))) {
             if (Test-Path -LiteralPath $path -PathType Leaf) { $chosenEnv = $path; break }
         }
+    }
+    if (-not $chosenEnv -and -not ($SmokeTest -or $PreflightOnly)) {
+        # First-run setup: write %APPDATA%\G-reality\.env.local from hidden console input.
+        Write-Host ''
+        Write-Host 'First-run setup. G-reality keeps worlds in your own PostgreSQL database; a free Neon project works:'
+        Write-Host '  https://neon.tech -> New project -> Connect -> copy the connection string (postgresql://...).'
+        Write-Host 'Without a database, the read-only sample world still runs on the G-reality website (no install).'
+        $database = Read-Secret 'Paste DATABASE_URL (input hidden; Enter to cancel)'
+        if ([string]::IsNullOrWhiteSpace($database)) { Check '--' 'Setup cancelled: no database URL entered.'; throw 'A database URL is required to run the companion.' }
+        if ($database -notmatch '^postgres(ql)?://') { Check '!!' 'That does not look like a PostgreSQL URL (postgresql://...).'; throw 'Invalid DATABASE_URL.' }
+        $gemini = Read-Secret 'Optional: paste a Gemini API key (input hidden; Enter to skip and use the keyword interpreter)'
+        $interpreter = 'rules'
+        if (-not [string]::IsNullOrWhiteSpace($gemini)) { $interpreter = 'gemini' }
+        $configDir = Join-Path $env:APPDATA 'G-reality'
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+        $chosenEnv = Join-Path $configDir '.env.local'
+        $text = "DATABASE_URL=$($database.Trim())`r`nGEMINI_API_KEY=$($gemini.Trim())`r`nGREALITY_INTERPRETER=$interpreter`r`n"
+        [IO.File]::WriteAllText($chosenEnv, $text, (New-Object Text.UTF8Encoding $false))
+        Check 'ok' "Settings saved to $chosenEnv (edit or delete it to change them)."
     }
     if (-not $chosenEnv) {
         Check '!!' 'Secrets file missing. Copy env.example to .env.local next to G-reality.cmd or to %APPDATA%\G-reality\.env.local; fill DATABASE_URL and GEMINI_API_KEY.'
@@ -134,6 +173,8 @@ try {
             [IO.File]::WriteAllText($ready, [DateTime]::UtcNow.ToString('o'))
         }
         Set-LaunchEnvironment 'GREALITY_ENV_FILE' $chosenEnv
+        # The Gemini interpreter refuses to start without a key; the process variable overrides the secrets file.
+        if ([string]::IsNullOrWhiteSpace($settings['GEMINI_API_KEY'])) { Set-LaunchEnvironment 'GREALITY_INTERPRETER' 'rules' }
         Set-LaunchEnvironment 'GREALITY_WEB_DIR' (Join-Path $app 'web')
         Set-LaunchEnvironment 'PYTHONPATH' ((Join-Path $app 'services') + ';' + (Join-Path $app 'packages\contracts\python'))
         Set-LaunchEnvironment 'GREALITY_PORT' ([string]$Port)
@@ -143,6 +184,11 @@ try {
         if ($NoBrowser -or $SmokeTest) { $openBrowser = '0' }
         Set-LaunchEnvironment 'GREALITY_OPEN_BROWSER' $openBrowser
         Set-LaunchEnvironment 'PYTHONUNBUFFERED' '1'
+        # Idempotent: already-applied versions are skipped, so a fresh Neon database is set up on first launch.
+        Write-Host 'Database schema:'
+        Push-Location $app
+        try { & $venvPython -m world_api.migrate } finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { Check '!!' 'Database migration failed. Check DATABASE_URL and your network connection.'; throw 'Database migration failed.' }
         if ($SmokeTest) { $token = [guid]::NewGuid().ToString('N'); Set-LaunchEnvironment 'GREALITY_TOKEN' $token }
         $stdoutPath = $logBase + '-server-out.log'
         $stderrPath = $logBase + '-server-err.log'

@@ -303,7 +303,7 @@ export class Gameplay {
     const prompt = this.prompt;
     if (!world || !prompt || !prompt.enabled || this.busy) return;
     if (!this.companion) {
-      this.ui.toast("This is the read-only offline sample. Generate or open a saved world to change it.", "error");
+      this.ui.toast("This is the read-only sample. Interactions and persistent changes need the G-reality Windows companion.", "error");
       return;
     }
     this.busy = true;

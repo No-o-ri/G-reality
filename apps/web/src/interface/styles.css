@@ -83,6 +83,15 @@ button.tiny { padding: 1px 6px; font-size: 11px; margin: 0; }
 .landing button:disabled { opacity: .45; cursor: default; }
 .landing button.primary, .pause button.primary { background: linear-gradient(180deg, #ffb35c, #f07a2a); color: #1b0d02; border: 0;
   font-weight: 650; padding: 10px 22px; }
+.landing a.button { display: inline-block; border-radius: 9px; font-size: 14px; padding: 9px 16px; text-decoration: none;
+  border: 1px solid rgba(255,255,255,.28); background: rgba(255,255,255,.1); color: #e8eef4; font-weight: 600; }
+.landing a.button:hover { background: rgba(255,255,255,.16); }
+.prompt-box.public { padding: 18px; }
+.prompt-box.public .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.prompt-box.public .hint { color: #c3cfda; font-size: 14px; line-height: 1.5; margin: 14px 0 0; }
+.prompt-box.public .why { margin: 12px 0; padding-left: 18px; color: #c3cfda; font-size: 13.5px; line-height: 1.5; }
+.prompt-box.public .why li { margin-bottom: 6px; }
+.prompt-box.public .why b { color: #f2f5f8; }
 .landing button.link { background: none; border: 0; color: #9fd8ff; padding: 0; text-decoration: underline; }
 .landing .sample { margin-top: 18px; display: inline-block; font-size: 13px; }
 .examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }

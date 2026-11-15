@@ -128,7 +128,8 @@ describe('step scales and sampled bounds', () => {
     const d = def(node('sphere', { radius: { ref: 'r' } })); d.parameters = { r: { min: 0.1, default: 1, max: 3 } };
     const b = estimateBounds(d); expect(b.min[0]).toBeLessThanOrEqual(-3); expect(b.max[0]).toBeGreaterThanOrEqual(3);
     expect(estimateBounds(d, { r: 1 }).max[0]).toBeLessThan(b.max[0]);
-    expect(estimateBounds(def(node('translate', { offset: [100, 0, 0] }, [sphere()])))).toEqual({ min: [-10, -10, -10], max: [10, 10, 10] });
+    // nothing found: the search box doubles up to 8× bound_radius (10 → 80), then falls back to that full cube
+    expect(estimateBounds(def(node('translate', { offset: [100, 0, 0] }, [sphere()])))).toEqual({ min: [-80, -80, -80], max: [80, 80, 80] });
   });
   const archetypes = JSON.parse(readFileSync(new URL('../../../tests/golden/archetypes.json', import.meta.url), 'utf8')) as GeometryDefinition[];
   for (const d of archetypes) it(`contains deterministic interior samples of ${d.id}`, () => {

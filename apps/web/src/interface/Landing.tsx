@@ -3,9 +3,10 @@
  * asked or when no key is configured), or reopen a saved world. The live engine renders the offline sample behind it.
  */
 import { useState } from "react";
-import type { WorldSummary } from "../app/api";
+import { DOWNLOAD_URL, type WorldSummary } from "../app/api";
 
 export type BackendState =
+  | { state: "public" }
   | { state: "checking" }
   | { state: "connected"; database: string; contract: string }
   | { state: "unauthorized" }
@@ -44,6 +45,7 @@ export function Landing({ backend, worlds, progress, error, onGenerate, onOpen, 
   const [prompt, setPrompt] = useState("");
   const connected = backend.state === "connected";
   const busy = progress !== null;
+  const publicSite = backend.state === "public";
   const submit = (offline = false) => {
     if (prompt.trim().length >= 3 && connected && !busy) onGenerate(prompt.trim(), offline);
   };
@@ -58,7 +60,27 @@ export function Landing({ backend, worlds, progress, error, onGenerate, onOpen, 
           change you make is kept by the world.
         </p>
 
-        <div className={`prompt-box ${busy ? "busy" : ""}`}>
+        {publicSite && (
+          <div className="prompt-box public">
+            <div className="row">
+              <button className="primary" onClick={onSample} disabled={busy}>Play the sample world</button>
+              <a className="button" href={DOWNLOAD_URL}>Download for Windows</a>
+            </div>
+            <p className="hint">
+              The sample runs entirely in your browser: no install, no account. It is a read-only snapshot of a world the
+              companion generated. Describing new worlds, interacting with them and keeping your changes needs the free
+              Windows companion with your own Neon database (a Gemini key is optional).
+            </p>
+            <ul className="why">
+              <li><b>Mathematical geometry.</b> Every tree, rock and house is a signed-distance program generated from the description, validated, and ray-marched on your GPU — not a mesh or picture produced by an image model.</li>
+              <li><b>Persistent state.</b> A world is server-authoritative data in PostgreSQL: each change is a numbered revision that is still there next session.</li>
+              <li><b>World-specific rules.</b> Interactions and environmental simulation (fire spreading between nearby objects) are generated per world and applied by the server.</li>
+            </ul>
+            <div className="hint small">Controls: click to look · WASD move · Shift sprint · Space jump · Esc release the mouse</div>
+          </div>
+        )}
+
+        {!publicSite && <div className={`prompt-box ${busy ? "busy" : ""}`}>
           <textarea
             rows={3}
             maxLength={2000}
@@ -76,9 +98,9 @@ export function Landing({ backend, worlds, progress, error, onGenerate, onOpen, 
               {busy ? "Generating…" : "Generate world"}
             </button>
           </div>
-        </div>
+        </div>}
 
-        {!busy && (
+        {!busy && !publicSite && (
           <div className="examples">
             {EXAMPLES.map((ex) => (
               <button key={ex} className="example" onClick={() => setPrompt(ex)} title={ex}>
@@ -142,7 +164,7 @@ export function Landing({ backend, worlds, progress, error, onGenerate, onOpen, 
             </div>
           </div>
         )}
-        <button className="link sample" onClick={onSample} disabled={busy}>Explore the offline sample world (read-only)</button>
+        {!publicSite && <button className="link sample" onClick={onSample} disabled={busy}>Explore the offline sample world (read-only)</button>}
       </div>
     </div>
   );
