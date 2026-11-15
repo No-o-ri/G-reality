@@ -6,7 +6,8 @@
  * progress, flame strength, shrinking foliage) from the authoritative burn_started_tick and the synchronized tick,
  * using the same formula as services/world_api/simulation.py.
  */
-import type { MutationResult, RegionCoord, WorldEntity, WorldSync } from "@contracts";
+import type { InteractionCondition, InteractionSpec, MutationResult, ObjectBehavior, RegionCoord, WorldEntity, WorldEvent, WorldSync } from "@contracts";
+import type { MoteKind } from "../rendering/effects/FireSystem";
 import type { Companion } from "./api";
 import type { Engine } from "./Engine";
 import type { DynamicVisual } from "../rendering/nearfield/NearField";
@@ -39,6 +40,30 @@ export interface InteractionPrompt {
   label: string; // e.g. "E — Burn it?"
   enabled: boolean;
   hint?: string;
+  /** generated interaction id, or "__burn" for the built-in fire */
+  action?: string;
+  options?: number;
+}
+
+/** Mirror of interactions.check(): do the generated interaction's guards hold for this entity? */
+export function conditionsHold(spec: InteractionSpec, e: WorldEntity): boolean {
+  const vars = ((e.state as { vars?: Record<string, number> }).vars ?? {}) as Record<string, number>;
+  return (spec.requires ?? []).every((c: InteractionCondition) => {
+    if (c.condition) {
+      const same = (e.state?.condition ?? "intact") === c.condition;
+      return c.op === "!=" ? !same : same;
+    }
+    const v = vars[c.var ?? ""] ?? 0;
+    const x = c.value ?? 0;
+    switch (c.op) {
+      case "<": return v < x;
+      case "<=": return v <= x;
+      case ">": return v > x;
+      case "==": return v === x;
+      case "!=": return v !== x;
+      default: return v >= x;
+    }
+  });
 }
 
 export interface GameplayEvents {
@@ -56,6 +81,8 @@ export class Gameplay {
   private smoulder = new Map<string, number>(); // entity id -> local time (s) its fire went out
   private lastSaved = "";
   prompt: InteractionPrompt | null = null;
+  private choice = 0;
+  private choiceEntity = "";
   lastSyncMs: number | null = null;
   syncError: string | null = null;
 
@@ -195,17 +222,40 @@ export class Gameplay {
       if (e.state?.condition === "charred" || e.state?.condition === "removed") continue;
       const g = this.engine.near.archetypeGlow(e.geometry_id);
       if (!g) continue;
+      const emission = ((e.state as { vars?: Record<string, number> }).vars ?? {}).emission ?? 1;
+      if (emission <= 0.02) continue;
       const pos = e.transform.position as number[];
       const d = Math.hypot(pos[0] - cam.x, pos[2] - cam.z);
       if (d > 45) continue;
       const peak = Math.max(g[0], g[1], g[2]);
-      glows.push({ x: pos[0], y: pos[1] + e.bound_radius * 0.6, z: pos[2], intensity: Math.min(6, peak) * (e.transform.scale ?? 1), d,
+      glows.push({ x: pos[0], y: pos[1] + e.bound_radius * 0.6, z: pos[2], intensity: Math.min(6, peak) * emission * (e.transform.scale ?? 1), d,
         color: [g[0] / peak, g[1] / peak, g[2] / peak] });
     }
     glows.sort((a, b) => a.d - b.d);
     this.engine.near.setFireLights([...lights, ...glows].slice(0, 8));
     this.engine.setFireSources(sources);
     this.updatePrompt();
+  }
+
+  /** The actions this entity offers right now: its generated interactions (guards checked) and, if it is
+   * flammable and intact, the built-in Burn. */
+  private options(e: WorldEntity): { id: string; verb: string; range: number }[] {
+    const behaviors = (this.engine.world?.spec as { behaviors?: Record<string, ObjectBehavior> } | undefined)?.behaviors ?? {};
+    const out: { id: string; verb: string; range: number }[] = [];
+    const reachBonus = Math.min(e.bound_radius, 3) * 0.5;
+    for (const it of behaviors[e.geometry_id]?.interactions ?? []) {
+      if (it.player_initiated === false || !conditionsHold(it, e)) continue;
+      out.push({ id: it.id, verb: it.verb, range: (it.range_m ?? 4) + reachBonus });
+    }
+    if ((e.capabilities ?? []).includes("flammable") && (e.state?.condition ?? "intact") === "intact") {
+      out.push({ id: "__burn", verb: "Burn it", range: ACTION_RANGE_M + reachBonus });
+    }
+    return out;
+  }
+
+  /** R key: next available action of the object under the crosshair. */
+  cycle(): void {
+    this.choice += 1;
   }
 
   private updatePrompt(): void {
@@ -215,15 +265,36 @@ export class Gameplay {
       return;
     }
     const { entity: e, distance } = hit;
-    const reach = ACTION_RANGE_M + Math.min(e.bound_radius, 3) * 0.5;
-    const flammable = (e.capabilities ?? []).includes("flammable");
+    if (e.id !== this.choiceEntity) {
+      this.choiceEntity = e.id;
+      this.choice = 0;
+    }
     const c = e.state?.condition ?? "intact";
-    const name = e.kind === "tree" ? "tree" : e.kind;
-    if (c === "burning") this.prompt = { entityId: e.id, kind: e.kind, label: `The ${name} is burning`, enabled: false };
-    else if (c === "charred") this.prompt = { entityId: e.id, kind: e.kind, label: `A charred ${name}`, enabled: false };
-    else if (!flammable) this.prompt = null;
-    else if (distance > reach) this.prompt = { entityId: e.id, kind: e.kind, label: "E — Burn it?", enabled: false, hint: "Move closer" };
-    else this.prompt = { entityId: e.id, kind: e.kind, label: "E — Burn it?", enabled: !this.busy, hint: this.companion ? undefined : "offline sample: read-only" };
+    const name = e.kind === "tree" ? "tree" : e.kind.replace(/_/g, " ");
+    const opts = this.options(e);
+    if (!opts.length) {
+      this.prompt = c === "burning" ? { entityId: e.id, kind: e.kind, label: `The ${name} is burning`, enabled: false }
+        : c === "charred" ? { entityId: e.id, kind: e.kind, label: `A charred ${name}`, enabled: false } : null;
+      return;
+    }
+    const o = opts[this.choice % opts.length];
+    const more = opts.length > 1 ? `R: other actions (${(this.choice % opts.length) + 1}/${opts.length})` : undefined;
+    const label = `E — ${o.verb.replace(/\?$/, "")}?`;
+    if (distance > o.range) this.prompt = { entityId: e.id, kind: e.kind, label, enabled: false, hint: "Move closer", action: o.id, options: opts.length };
+    else this.prompt = { entityId: e.id, kind: e.kind, label, enabled: !this.busy, action: o.id, options: opts.length,
+      hint: this.companion ? more : "offline sample: read-only" };
+  }
+
+  /** Play the visual events (`emit` effects) of committed interactions. */
+  private playEmits(events: WorldEvent[]): void {
+    for (const ev of events) {
+      const emits = ((ev.payload ?? {}) as { emits?: { particles: MoteKind; color: number[] | null; count: number; position: number[]; entity_id: string }[] }).emits ?? [];
+      for (const m of emits) {
+        const e = this.engine.loadedEntities().find((x) => x.id === m.entity_id);
+        const h = e ? Math.max(0.8, e.bound_radius * 0.8 * (e.transform.scale ?? 1)) : 1.5;
+        this.engine.fire.burst(m.particles, m.position as [number, number, number], (m.color as [number, number, number] | null) ?? null, Math.max(10, m.count || 60), h);
+      }
+    }
   }
 
   /** E key: ask the server to ignite the entity under the crosshair. */
@@ -238,13 +309,15 @@ export class Gameplay {
     this.busy = true;
     const p = this.engine.player;
     const f = p.forward();
+    const generated = prompt.action && prompt.action !== "__burn";
     try {
       const result: MutationResult = await this.companion.command({
         command_id: crypto.randomUUID(),
         world_id: world.world_id,
         player_id: world.player.player_id,
-        text: "Burn it",
-        action: "ignite",
+        text: generated ? prompt.label : "Burn it",
+        action: generated ? "interact" : "ignite",
+        interaction: generated ? prompt.action : undefined,
         target_hint: prompt.entityId,
         player_position: [p.position.x, p.position.y - 1.0, p.position.z],
         view_direction: [f.x, f.y, f.z],
@@ -252,8 +325,9 @@ export class Gameplay {
       });
       if (result.status === "committed") {
         this.engine.applyEntities(result.entities ?? []);
+        this.playEmits(result.events ?? []);
         this.revision = Math.max(this.revision, result.world_revision);
-        this.ui.toast(result.message || "It catches fire.", "fire");
+        this.ui.toast(result.message || "It catches fire.", generated ? "info" : "fire");
         void this.syncOnce();
       } else {
         this.ui.toast(result.message, "error");

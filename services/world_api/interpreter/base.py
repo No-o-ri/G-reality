@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..worldspec import WorldDraft
 
-ActionName = Literal["ignite", "extinguish", "remove", "build", "inspect", "unknown"]
+ActionName = Literal["interact", "ignite", "extinguish", "remove", "build", "inspect", "unknown"]
 
 
 class IntentDraft(BaseModel):

@@ -29,7 +29,7 @@ export type StateOk = boolean;
  * This interface was referenced by `GRealityContracts`'s JSON-Schema
  * via the `definition` "ActionType".
  */
-export type ActionType = "ignite" | "extinguish" | "remove" | "build" | "inspect";
+export type ActionType = "interact" | "ignite" | "extinguish" | "remove" | "build" | "inspect";
 export type Code1 = string;
 export type Detail = {
   [k: string]: unknown;
@@ -106,6 +106,10 @@ export type Hazard = number;
 export type HazardRadius = number;
 export type Integrity = number;
 export type Ambient = number;
+/**
+ * 0 clear .. 1 overcast
+ */
+export type CloudCover = number;
 export type FogBaseHeight = number;
 /**
  * @minItems 3
@@ -153,6 +157,7 @@ export type EventType =
   | "fire_spread"
   | "entity_burned_out"
   | "entity_extinguished"
+  | "entity_interacted"
   | "entity_removed"
   | "entity_built"
   | "resource_changed"
@@ -286,6 +291,80 @@ export type QueueDepth = number;
 export type Rasterizers = ("gsplat" | "torch")[];
 export type Service = "greality-companion";
 export type ServiceVersion = string;
+export type Condition2 = ("intact" | "burning" | "charred" | "removed") | null;
+export type Op1 = "<" | "<=" | ">" | ">=" | "==" | "!=";
+export type Value = number;
+/**
+ * state variable; None = use `condition`
+ */
+export type Var = string | null;
+export type Amount = number;
+export type Color = [unknown, unknown, unknown] | null;
+export type Condition3 = ("intact" | "charred" | "removed") | null;
+export type Count1 = number;
+export type Interaction = string | null;
+export type Max2 = number;
+export type MaxTargets = number;
+export type Min2 = number;
+export type Param = string | null;
+export type Particles = ("sparks" | "spores" | "dust" | "smoke" | "embers" | "glow") | null;
+export type RadiusM = number;
+export type Resource = string | null;
+export type SameKind = boolean;
+export type Type =
+  "set_var" | "add_var" | "set_param" | "scale_param" | "set_condition" | "ignite" | "emit" | "give" | "trigger_nearby";
+export type Value1 = number;
+export type Var1 = string | null;
+/**
+ * @minItems 1
+ * @maxItems 8
+ */
+export type Effects =
+  | [InteractionEffect]
+  | [InteractionEffect, InteractionEffect]
+  | [InteractionEffect, InteractionEffect, InteractionEffect]
+  | [InteractionEffect, InteractionEffect, InteractionEffect, InteractionEffect]
+  | [InteractionEffect, InteractionEffect, InteractionEffect, InteractionEffect, InteractionEffect]
+  | [InteractionEffect, InteractionEffect, InteractionEffect, InteractionEffect, InteractionEffect, InteractionEffect]
+  | [
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect
+    ]
+  | [
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect,
+      InteractionEffect
+    ];
+export type Id3 = string;
+export type Message2 = string;
+/**
+ * False = only reachable through trigger_nearby
+ */
+export type PlayerInitiated = boolean;
+export type RangeM = number;
+/**
+ * @maxItems 4
+ */
+export type Requires =
+  | []
+  | [InteractionCondition]
+  | [InteractionCondition, InteractionCondition]
+  | [InteractionCondition, InteractionCondition, InteractionCondition]
+  | [InteractionCondition, InteractionCondition, InteractionCondition, InteractionCondition];
+/**
+ * player prompt: 'E - <verb>?'
+ */
+export type Verb = string;
 /**
  * This interface was referenced by `GRealityContracts`'s JSON-Schema
  * via the `definition` "JobState".
@@ -319,7 +398,7 @@ export type BoundRadius1 = number;
 export type Capabilities1 = Capability[];
 export type CreatedRevision = number;
 export type GeometryId1 = string;
-export type Id3 = string;
+export type Id4 = string;
 /**
  * semantic type: tree, rock, house, campfire, ...
  */
@@ -366,7 +445,7 @@ export type Failures1 = PreconditionFailure[];
 /**
  * player-facing explanation
  */
-export type Message2 = string;
+export type Message3 = string;
 export type Status = "committed" | "rejected" | "conflict" | "error";
 /**
  * current world revision after handling the command
@@ -428,6 +507,19 @@ export type Reason = "explore" | "mutation" | "manual";
 export type SourceRegionRevision = number;
 export type StartedAt = string | null;
 export type WorldId4 = string;
+/**
+ * @maxItems 4
+ */
+export type Interactions =
+  | []
+  | [InteractionSpec]
+  | [InteractionSpec, InteractionSpec]
+  | [InteractionSpec, InteractionSpec, InteractionSpec]
+  | [InteractionSpec, InteractionSpec, InteractionSpec, InteractionSpec];
+/**
+ * physical material, e.g. wood, crystal, stone
+ */
+export type Material1 = string;
 export type Health = number;
 export type Pitch = number;
 export type PlayerId = string;
@@ -510,6 +602,10 @@ export type WorldId8 = string;
  */
 export type CommandId3 = string;
 export type ExpectedWorldRevision = number | null;
+/**
+ * with action=interact: id of the generated interaction to perform
+ */
+export type Interaction1 = string | null;
 export type PlayerId1 = string;
 /**
  * @minItems 3
@@ -528,11 +624,11 @@ export type Text = string;
 export type ViewDirection = [unknown, unknown, unknown];
 export type WorldId9 = string;
 /**
- * @maxItems 24
+ * @maxItems 64
  */
 export type Archetypes = GeometryDefinition[];
 /**
- * @maxItems 32
+ * @maxItems 96
  */
 export type Features = FeatureSpec[];
 /**
@@ -663,6 +759,7 @@ export interface EntityState {
   hazard_radius?: HazardRadius;
   integrity?: Integrity;
   resources?: Resources;
+  vars?: Vars;
 }
 /**
  * harvestable yield, e.g. {'wood': 4}
@@ -671,11 +768,18 @@ export interface Resources {
   [k: string]: number;
 }
 /**
+ * named state of generated interactions, e.g. emission, charge, spores
+ */
+export interface Vars {
+  [k: string]: number;
+}
+/**
  * This interface was referenced by `GRealityContracts`'s JSON-Schema
  * via the `definition` "EnvironmentState".
  */
 export interface EnvironmentState {
   ambient?: Ambient;
+  cloud_cover?: CloudCover;
   fog_base_height?: FogBaseHeight;
   fog_color?: FogColor;
   fog_density?: FogDensity;
@@ -814,6 +918,55 @@ export interface HealthReport {
   service_version: ServiceVersion;
 }
 /**
+ * Guard on the acting entity: a state variable compared with a value, or its condition.
+ *
+ * This interface was referenced by `GRealityContracts`'s JSON-Schema
+ * via the `definition` "InteractionCondition".
+ */
+export interface InteractionCondition {
+  condition?: Condition2;
+  op?: Op1;
+  value?: Value;
+  var?: Var;
+}
+/**
+ * One state transition. Fields used depend on `type` (unused fields are ignored).
+ *
+ * This interface was referenced by `GRealityContracts`'s JSON-Schema
+ * via the `definition` "InteractionEffect".
+ */
+export interface InteractionEffect {
+  amount?: Amount;
+  color?: Color;
+  condition?: Condition3;
+  count?: Count1;
+  interaction?: Interaction;
+  max?: Max2;
+  max_targets?: MaxTargets;
+  min?: Min2;
+  param?: Param;
+  particles?: Particles;
+  radius_m?: RadiusM;
+  resource?: Resource;
+  same_kind?: SameKind;
+  type: Type;
+  value?: Value1;
+  var?: Var1;
+}
+/**
+ * This interface was referenced by `GRealityContracts`'s JSON-Schema
+ * via the `definition` "InteractionSpec".
+ */
+export interface InteractionSpec {
+  effects: Effects;
+  id: Id3;
+  message?: Message2;
+  player_initiated?: PlayerInitiated;
+  range_m?: RangeM;
+  requires?: Requires;
+  verb: Verb;
+}
+/**
  * This interface was referenced by `GRealityContracts`'s JSON-Schema
  * via the `definition` "MutationResult".
  */
@@ -824,7 +977,7 @@ export interface MutationResult {
   entities?: Entities;
   events?: Events;
   failures?: Failures1;
-  message: Message2;
+  message: Message3;
   status: Status;
   world_revision: WorldRevision;
 }
@@ -874,7 +1027,7 @@ export interface WorldEntity {
   created_revision: CreatedRevision;
   geometry_id: GeometryId1;
   geometry_params?: GeometryParams;
-  id: Id3;
+  id: Id4;
   kind: Kind1;
   origin?: Origin;
   region: RegionCoord;
@@ -984,6 +1137,20 @@ export interface NeuralGenerationJob {
   started_at?: StartedAt;
   state: JobState;
   world_id: WorldId4;
+}
+/**
+ * Generated behaviour of one archetype: initial state variables and the interactions it supports.
+ *
+ * This interface was referenced by `GRealityContracts`'s JSON-Schema
+ * via the `definition` "ObjectBehavior".
+ */
+export interface ObjectBehavior {
+  interactions?: Interactions;
+  material?: Material1;
+  vars?: Vars1;
+}
+export interface Vars1 {
+  [k: string]: number;
 }
 /**
  * This interface was referenced by `GRealityContracts`'s JSON-Schema
@@ -1106,6 +1273,7 @@ export interface WorldCommand {
   action?: ActionType | null;
   command_id: CommandId3;
   expected_world_revision?: ExpectedWorldRevision;
+  interaction?: Interaction1;
   player_id: PlayerId1;
   player_position: PlayerPosition;
   target_hint?: TargetHint;
@@ -1121,6 +1289,7 @@ export interface WorldCommand {
  */
 export interface WorldSpec {
   archetypes: Archetypes;
+  behaviors?: Behaviors;
   environment?: EnvironmentState;
   features: Features;
   interpretation_notes?: InterpretationNotes;
@@ -1128,6 +1297,12 @@ export interface WorldSpec {
   spawn?: Spawn;
   terrain: TerrainDefinition;
   title: Title;
+}
+/**
+ * geometry_id -> generated behaviour
+ */
+export interface Behaviors {
+  [k: string]: ObjectBehavior;
 }
 /**
  * Authoritative world header. Regions and entities load through RegionSnapshot.

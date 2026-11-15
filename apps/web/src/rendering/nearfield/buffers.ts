@@ -8,7 +8,7 @@
  *   texel 1: rotation quaternion (x, y, z, w)
  *   texel 2: world-space bounding sphere center.xyz, radius
  *   texel 3: archetype parameters (up to 4, in declaration order)
- *   texel 4: archetype index, burning flag (0/1), burn visual (0..1), unused
+ *   texel 4: archetype index, burning flag (0/1), burn visual (0..1), emission multiplier (state var 'emission')
  */
 import type { WorldEntity } from "@contracts";
 import type { CompiledArchetype } from "../../sdf/compiler";
@@ -94,7 +94,8 @@ export function buildInstances(entities: WorldEntity[], archetypes: Map<string, 
 
     const burning = condition === "burning";
     const burnVisual = condition === "charred" ? 1 : burning ? Math.max(0.2, params.burn ?? 0) : (params.burn ?? 0);
-    data.set([rt.compiled.index, burning ? 1 : 0, burnVisual, 0], o + 16);
+    const emission = (state as { vars?: Record<string, number> }).vars?.emission ?? 1;
+    data.set([rt.compiled.index, burning ? 1 : 0, burnVisual, Math.max(0, Math.min(4, emission))], o + 16);
     ids.push(e.id);
     count += 1;
   }

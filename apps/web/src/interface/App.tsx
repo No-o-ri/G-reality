@@ -227,6 +227,7 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
       if (e.code === "KeyE" && !typing) void gameplayRef.current?.interact();
+      if (e.code === "KeyR" && !typing) gameplayRef.current?.cycle();
       if (e.code === "Backquote" && !typing) {
         setDevMode((v) => {
           engine.setDevMode(!v);
@@ -259,6 +260,7 @@ export function App() {
   const generate = async (text: string, offline: boolean) => {
     const engine = engineRef.current;
     if (!engine) return;
+    engine.onProgress = (stage) => setProgress((p) => (p ? { ...p, stage } : p));
     setGenError(null);
     const startedAt = Date.now();
     setProgress({ stage: offline ? "Interpreting your description (offline keyword interpreter)…" : "Designing your world with Gemini…", startedAt });
@@ -288,6 +290,7 @@ export function App() {
 
   const openSaved = async (worldId: string) => {
     setGenError(null);
+    if (engineRef.current) engineRef.current.onProgress = (stage) => setProgress((p) => (p ? { ...p, stage } : p));
     setProgress({ stage: "Loading the world from Neon…", startedAt: Date.now() });
     const ok = await openLive(worldId);
     setProgress(null);

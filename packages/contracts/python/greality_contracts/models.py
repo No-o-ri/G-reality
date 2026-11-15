@@ -162,6 +162,7 @@ class EnvironmentState(Contract):
     wind: tuple[float, float] = Field(default=(1.0, 0.0), description="XZ wind vector, m/s")
     humidity: float = Field(default=0.4, ge=0.0, le=1.0)
     temperature_c: float = Field(default=18.0, ge=-60.0, le=60.0)
+    cloud_cover: float = Field(default=0.35, ge=0.0, le=1.0, description="0 clear .. 1 overcast")
 
 
 # --------------------------------------------------------------------------- entities
@@ -182,6 +183,59 @@ class Condition(str, Enum):
     removed = "removed"
 
 
+# --------------------------------------------------------------------------- generated interactions
+# A closed, declarative grammar: Gemini composes object behaviour from these conditions and effects the way it composes
+# geometry from SDF ops. The server executes it deterministically (world_api/interactions.py); nothing is code.
+
+class InteractionCondition(Contract):
+    """Guard on the acting entity: a state variable compared with a value, or its condition."""
+
+    var: Optional[str] = Field(default=None, max_length=24, description="state variable; None = use `condition`")
+    op: Literal["<", "<=", ">", ">=", "==", "!="] = ">="
+    value: float = 0.0
+    condition: Optional[Literal["intact", "burning", "charred", "removed"]] = None
+
+
+class InteractionEffect(Contract):
+    """One state transition. Fields used depend on `type` (unused fields are ignored)."""
+
+    type: Literal["set_var", "add_var", "set_param", "scale_param", "set_condition", "ignite", "emit", "give",
+                  "trigger_nearby"]
+    var: Optional[str] = Field(default=None, max_length=24)           # set_var / add_var
+    param: Optional[str] = Field(default=None, max_length=24)         # set_param / scale_param (geometry parameter)
+    value: float = 0.0                                                # set_var / add_var delta / set_param / factor
+    min: float = -1000.0                                              # add_var / scale_param clamp
+    max: float = 1000.0
+    condition: Optional[Literal["intact", "charred", "removed"]] = None  # set_condition
+    particles: Optional[Literal["sparks", "spores", "dust", "smoke", "embers", "glow"]] = None  # emit (visual only)
+    color: Optional[Vec3] = None
+    count: int = Field(default=0, ge=0, le=400)
+    resource: Optional[str] = Field(default=None, max_length=24)      # give
+    amount: int = Field(default=0, ge=0, le=100)
+    radius_m: float = Field(default=0.0, ge=0.0, le=30.0)             # trigger_nearby
+    max_targets: int = Field(default=0, ge=0, le=8)
+    same_kind: bool = True
+    interaction: Optional[str] = Field(default=None, max_length=24)   # trigger_nearby: interaction id run on targets
+
+
+class InteractionSpec(Contract):
+    id: str = Field(min_length=1, max_length=24, pattern=r"^[a-z0-9_]+$")
+    verb: str = Field(min_length=1, max_length=24, description="player prompt: 'E - <verb>?'")
+    range_m: float = Field(default=4.0, ge=0.5, le=10.0)
+    player_initiated: bool = Field(default=True, description="False = only reachable through trigger_nearby")
+    requires: list[InteractionCondition] = Field(default_factory=list, max_length=4)
+    effects: list[InteractionEffect] = Field(min_length=1, max_length=8)
+    message: str = Field(default="", max_length=160)
+
+
+class ObjectBehavior(Contract):
+    """Generated behaviour of one archetype: initial state variables and the interactions it supports."""
+
+    vars: dict[str, float] = Field(default_factory=dict, max_length=8)
+    interactions: list[InteractionSpec] = Field(default_factory=list, max_length=4)
+    material: str = Field(default="", max_length=32, description="physical material, e.g. wood, crystal, stone")
+
+
 class EntityState(Contract):
     """Authoritative simulated state of one entity. Rendering derives from this, never the reverse."""
 
@@ -194,6 +248,8 @@ class EntityState(Contract):
     blocks_path: bool = False
     hazard: float = Field(default=0.0, ge=0.0, le=1.0, description="damage per tick to a player within hazard_radius")
     hazard_radius: float = Field(default=0.0, ge=0.0, le=100.0)
+    vars: dict[str, float] = Field(default_factory=dict, max_length=8,
+                                   description="named state of generated interactions, e.g. emission, charge, spores")
 
 
 class WorldEntity(Contract):
@@ -269,9 +325,10 @@ class WorldSpec(Contract):
     interpretation_notes: list[str] = Field(default_factory=list, description="what was constrained or dropped")
     terrain: TerrainDefinition
     environment: EnvironmentState = Field(default_factory=EnvironmentState)
-    archetypes: list[GeometryDefinition] = Field(max_length=24)
-    features: list[FeatureSpec] = Field(max_length=32)
+    archetypes: list[GeometryDefinition] = Field(max_length=64)
+    features: list[FeatureSpec] = Field(max_length=96)
     spawn: Vec3 = (0.0, 0.0, 0.0)
+    behaviors: dict[str, ObjectBehavior] = Field(default_factory=dict, description="geometry_id -> generated behaviour")
 
 
 class GenerationStatus(str, Enum):
@@ -324,6 +381,7 @@ class WorldState(Contract):
 
 
 class ActionType(str, Enum):
+    interact = "interact"  # a generated interaction (WorldCommand.interaction names it)
     ignite = "ignite"
     extinguish = "extinguish"
     remove = "remove"
@@ -342,6 +400,8 @@ class WorldCommand(Contract):
     expected_world_revision: Optional[int] = Field(default=None, ge=0)
     action: Optional[ActionType] = Field(
         default=None, description="structured interaction (e.g. the E key); when set, no language interpretation runs")
+    interaction: Optional[str] = Field(default=None, max_length=24,
+                                       description="with action=interact: id of the generated interaction to perform")
 
 
 class ParsedIntent(Contract):
@@ -394,6 +454,7 @@ class EventType(str, Enum):
     fire_spread = "fire_spread"
     entity_burned_out = "entity_burned_out"
     entity_extinguished = "entity_extinguished"
+    entity_interacted = "entity_interacted"
     entity_removed = "entity_removed"
     entity_built = "entity_built"
     resource_changed = "resource_changed"
@@ -602,6 +663,7 @@ EXPORTED = [
     WorldState, WorldRegion, WorldEntity, GeometryDefinition, MaterialDefinition, EnvironmentState,
     PlayerState, GameplayState, WorldSpec, RegionSnapshot,
     WorldCommand, ResolvedTarget, ActionPreconditions, ValidatedAction, WorldEvent, MutationResult, WorldSync,
+    ObjectBehavior, InteractionSpec, InteractionEffect, InteractionCondition,
     RegionRevision, DirtyRegion, NeuralGenerationJob, NeuralAssetManifest, RenderCacheEntry,
     ViewBundleManifest, HealthReport, ApiError,
 ]

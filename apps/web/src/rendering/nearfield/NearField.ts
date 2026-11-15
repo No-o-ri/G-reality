@@ -12,6 +12,7 @@ import { measureArchetype } from "../../sdf/measure";
 import { terrainHeight as cpuTerrainHeight } from "../../sdf/terrain";
 import type { DebugView, NearFieldRenderer, NearFieldStats, QualityProfile } from "../hybrid/types";
 import { DEBUG_VIEWS, QUALITY } from "../hybrid/types";
+import { skyLighting } from "../atmosphere";
 import { buildGrid, buildInstances, GRID_CAPACITY, INSTANCE_TEXELS, type ArchetypeRuntime, type GridData, type InstanceData } from "./buffers";
 import { buildMarchFragment, COMPOSITE_FRAG, FULLSCREEN_VERT, TERRAIN_PROBE_FRAG } from "./shader";
 
@@ -42,11 +43,6 @@ export function daylight(env: WorldState["environment"]): number {
   const h = env.time_of_day_h ?? 10;
   const e = Math.sin(((h - 6) / 12) * Math.PI);
   return Math.min(1, Math.max(0, (e + 0.08) / 0.35));
-}
-
-function scaledColor(rgb: number[], dayK: number, night: [number, number, number]): THREE.Vector3 {
-  return new THREE.Vector3(
-    rgb[0] * dayK + night[0] * (1 - dayK), rgb[1] * dayK + night[1] * (1 - dayK), rgb[2] * dayK + night[2] * (1 - dayK));
 }
 
 export function terrainStepFactor(t: TerrainDefinition): number {
@@ -128,6 +124,9 @@ export class NearField implements NearFieldRenderer {
   /** Opaque full-screen mesh to add to the shared scene; draws first and writes depth. */
   readonly compositeMesh: THREE.Mesh;
   compileErrors: string[] = [];
+  /** false while the world shader is compiling: the ray march is skipped (drawing would block on the compile) */
+  ready = false;
+  setupTimings = { glslMs: 0, measureMs: 0, gpuCompileMs: 0 };
 
   private readonly marchScene = new THREE.Scene();
   private readonly marchCamera = new THREE.Camera();
@@ -145,6 +144,10 @@ export class NearField implements NearFieldRenderer {
   private entityById = new Map<string, WorldEntity>();
   private rowById = new Map<string, number>();
   private readonly fireLights = Array.from({ length: MAX_FIRE_LIGHTS }, () => new THREE.Vector4());
+  private readonly ripples = Array.from({ length: 8 }, () => new THREE.Vector4());
+  private rippleNext = 0;
+  /** current lighting from the sky model (exposure and post-processing read it) */
+  sky = { daylight: 1, sun: new THREE.Vector3(1, 1, 1), sunDir: new THREE.Vector3(0, 1, 0) };
   private readonly fireColors = Array.from({ length: MAX_FIRE_LIGHTS }, () => new THREE.Vector3(1, 0.46, 0.14));
   private inst: InstanceData | null = null;
   private grid: GridData | null = null;
@@ -191,6 +194,7 @@ export class NearField implements NearFieldRenderer {
         tDepth: { value: this.target.depthTexture },
         uExposure: { value: 1.0 },
         uRaw: { value: 0 },
+        uLinearOut: { value: 0 },
       },
       depthTest: true,
       depthFunc: THREE.AlwaysDepth,
@@ -203,7 +207,11 @@ export class NearField implements NearFieldRenderer {
 
   // ---------------------------------------------------------------- world / program
 
-  setWorld(world: WorldState): void {
+  /**
+   * Compile a world. The GPU shader compile runs asynchronously (KHR_parallel_shader_compile through three's
+   * compileAsync), so the page stays responsive; the ray march is not drawn until it has finished.
+   */
+  async setWorld(world: WorldState): Promise<void> {
     const t0 = performance.now();
     this.world = world;
     const terrain = world.spec.terrain;
@@ -212,6 +220,7 @@ export class NearField implements NearFieldRenderer {
     if (terrain.peak_material) extra.push(terrain.peak_material);
     if (terrain.water_material && terrain.water_level != null) extra.push(terrain.water_material);
     const scene = compileScene(defs, extra);
+    const tGlsl = performance.now();
     this.scene = scene;
     const base = scene.materials.length - extra.length;
     const slots = {
@@ -240,6 +249,7 @@ export class NearField implements NearFieldRenderer {
       this.defs.set(def.id, def);
     }
 
+    const tMeasure = performance.now();
     const fragment = buildMarchFragment(scene.glsl, slots);
     this.shaderChars = fragment.length;
     const env = world.environment;
@@ -256,6 +266,7 @@ export class NearField implements NearFieldRenderer {
       depthFunc: THREE.AlwaysDepth,
       depthWrite: true,
       uniforms: {
+        uZero: { value: 0 },
         uCamWorld: { value: new THREE.Matrix4() },
         uProjInv: { value: new THREE.Matrix4() },
         uViewProj: { value: new THREE.Matrix4() },
@@ -276,10 +287,15 @@ export class NearField implements NearFieldRenderer {
         uTerrainBasin: { value: new THREE.Vector4(basin ? basin[0] : 0, basin ? basin[1] : 0, basin ? (terrain.basin_radius ?? 0) : 0, terrain.basin_depth ?? 0) },
         uSeedOffset: { value: new THREE.Vector2(seed & 1023, (seed >> 10) & 1023) },
         uSunDir: { value: sunFrom(env) },
-        // night: the sun becomes faint cool moonlight and the sky / fog darken
-        uSunColor: { value: scaledColor((env.sun_color ?? [1, 0.95, 0.85]) as number[], daylight(env), [0.09, 0.11, 0.17]) },
-        uSkyColor: { value: scaledColor((env.sky_color ?? [0.45, 0.62, 0.85]) as number[], daylight(env), [0.025, 0.035, 0.07]) },
-        uFogColor: { value: scaledColor((env.fog_color ?? [0.7, 0.76, 0.82]) as number[], daylight(env), [0.03, 0.04, 0.06]) },
+        // filled from the atmosphere model in applySky(): direct sun, zenith (ambient) and horizon (fog) colours
+        uSunColor: { value: new THREE.Vector3(1, 1, 1) },
+        uSkyColor: { value: new THREE.Vector3(0.4, 0.55, 0.8) },
+        uFogColor: { value: new THREE.Vector3(0.7, 0.75, 0.8) },
+        uSunRadiance: { value: new THREE.Vector3(20, 20, 20) },
+        uDaylight: { value: 1 },
+        uCloud: { value: new THREE.Vector4((env as { cloud_cover?: number }).cloud_cover ?? 0.35, 1, 0, 0) },
+        uRipples: { value: this.ripples },
+        uRippleCount: { value: 0 },
         uAmbient: { value: env.ambient ?? 0.25 },
         uFog: { value: new THREE.Vector3(env.fog_density ?? 0.004, env.fog_height_falloff ?? 0.02, env.fog_base_height ?? 0) },
         uCapture: { value: 0 },
@@ -293,16 +309,24 @@ export class NearField implements NearFieldRenderer {
     });
     this.marchMaterial?.dispose();
     this.marchMaterial = material;
+    this.applySky(env, env.time_of_day_h ?? 10);
     this.marchMesh.material = material;
     // uGridDim is an ivec2: three uploads Vector2 with uniform2iv only for integer typed uniforms it detects
     // from the program, which it does (it inspects the active uniform type).
-    this.compileNow();
-    this.compileMs = performance.now() - t0;
+    const tGpu = performance.now();
+    this.ready = false;
     this.setEntities(this.entities);
+    await this.compileNow();
+    if (this.marchMaterial !== material) return; // another world was opened meanwhile
+    this.ready = true;
+    this.compileMs = performance.now() - t0;
+    // where world setup time goes (shown in diagnostics; slow worlds are usually GPU shader compilation)
+    this.setupTimings = { glslMs: tGlsl - t0, measureMs: tMeasure - tGlsl, gpuCompileMs: performance.now() - tGpu };
+    console.info(`[G-reality] world setup: GLSL ${this.setupTimings.glslMs.toFixed(0)} ms, bounds ${this.setupTimings.measureMs.toFixed(0)} ms, GPU compile ${this.setupTimings.gpuCompileMs.toFixed(0)} ms`);
   }
 
-  /** Force shader compilation now and collect any errors instead of failing silently at first draw. */
-  private compileNow(): void {
+  /** Compile the world shader without blocking the page, collecting errors instead of failing at first draw. */
+  private async compileNow(): Promise<void> {
     this.compileErrors = [];
     const previous = this.renderer.debug.onShaderError;
     this.renderer.debug.onShaderError = (gl, program, vs, fs) => {
@@ -312,7 +336,8 @@ export class NearField implements NearFieldRenderer {
       this.compileErrors.push(log || "unknown shader error");
     };
     try {
-      this.renderer.compile(this.marchScene, this.marchCamera);
+      // resolves when the driver reports the program linked (polled, not blocking the main thread)
+      await this.renderer.compileAsync(this.marchScene, this.marchCamera);
     } finally {
       this.renderer.debug.onShaderError = previous;
     }
@@ -467,7 +492,43 @@ export class NearField implements NearFieldRenderer {
     if (!this.marchMaterial || !this.world) return;
     const u = this.marchMaterial.uniforms;
     if (patch.fogDensity !== undefined) u.uFog.value.x = patch.fogDensity;
-    if (patch.timeOfDay !== undefined) u.uSunDir.value.copy(sunFrom({ ...this.world.environment, time_of_day_h: patch.timeOfDay }));
+    if (patch.timeOfDay !== undefined) this.applySky(this.world.environment, patch.timeOfDay);
+  }
+
+  /** Derive sun, sky, ambient and fog colours from the atmosphere model for an hour of the day. */
+  private applySky(env: WorldState["environment"], hour: number): void {
+    if (!this.marchMaterial) return;
+    const u = this.marchMaterial.uniforms;
+    const e = { ...env, time_of_day_h: hour };
+    const dir = sunFrom(e);
+    const dayK = daylight(e);
+    const L = skyLighting([dir.x, dir.y, dir.z], dayK);
+    u.uSunDir.value.copy(dir);
+    u.uSunColor.value.set(...L.sun);
+    u.uSkyColor.value.set(...L.zenith);
+    // aerial perspective: the horizon colour of the sky model, slightly tinted by the world's own fog colour
+    const fog = (env.fog_color ?? [0.7, 0.76, 0.82]) as number[];
+    const lum = (L.horizon[0] + L.horizon[1] + L.horizon[2]) / 3;
+    u.uFogColor.value.set(L.horizon[0] * 0.8 + fog[0] * lum * 0.2, L.horizon[1] * 0.8 + fog[1] * lum * 0.2, L.horizon[2] * 0.8 + fog[2] * lum * 0.2);
+    u.uSunRadiance.value.setScalar(L.sunRadiance);
+    u.uDaylight.value = dayK;
+    const wind = (env.wind ?? [1, 0]) as number[];
+    u.uCloud.value.set((env as { cloud_cover?: number }).cloud_cover ?? 0.35, wind[0], wind[1], 0);
+    this.sky = { daylight: dayK, sun: new THREE.Vector3(...L.sun), sunDir: dir.clone() };
+  }
+
+  /** A ripple ring on the water at (x, z) starting now (player wading / swimming, interactions). */
+  addRipple(x: number, z: number, strength = 1): void {
+    if (!this.marchMaterial) return;
+    const now = (performance.now() - this.startTime) / 1000;
+    this.ripples[this.rippleNext].set(x, z, now, strength);
+    this.rippleNext = (this.rippleNext + 1) % this.ripples.length;
+    const u = this.marchMaterial.uniforms;
+    u.uRippleCount.value = Math.min(8, u.uRippleCount.value + 1);
+  }
+
+  setLinearOutput(on: boolean): void {
+    this.compositeMaterial.uniforms.uLinearOut.value = on ? 1 : 0;
   }
 
   setQuality(profile: QualityProfile): void {
@@ -505,7 +566,7 @@ export class NearField implements NearFieldRenderer {
 
   /** Pass A: ray march into the near-field target using the given scene camera. */
   renderToTarget(camera: THREE.PerspectiveCamera): void {
-    if (!this.marchMaterial) return;
+    if (!this.marchMaterial || !this.ready) return;
     const u = this.marchMaterial.uniforms;
     this.setCameraUniforms(camera);
     u.uTime.value = (performance.now() - this.startTime) / 1000;

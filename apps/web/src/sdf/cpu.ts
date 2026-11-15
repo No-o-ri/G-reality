@@ -226,15 +226,27 @@ export function estimateBounds(def: GeometryDefinition, params?: Record<string, 
 }
 
 function estimateBoundsIn(def: GeometryDefinition, R: number, params?: Record<string, number>): { min: Vec3; max: Vec3 } {
+  // Two levels: a 12³ grid over the box, then 3³ samples inside only those coarse cells the surface can reach (the
+  // same 36³ resolution as a full grid at a small fraction of the SDF evaluations; this runs on the main thread).
   const values = params ?? Object.fromEntries(Object.entries(def.parameters ?? {}).map(([k, v]) => [k, v.max]));
-  const cell = 2 * R / 28, diagonal = Math.sqrt(3) * cell;
-  const min: Vec3 = [R, R, R], max: Vec3 = [-R, -R, -R], p: Vec3 = [0, 0, 0], evaluate = compileCpu(def);
+  const evaluate = compileCpu(def);
+  const C = 12;
+  const coarse = 2 * R / C;
+  const coarseReach = Math.sqrt(3) * coarse * 0.5 + 1e-6;
+  const fine = coarse / 3;
+  const fineDiag = Math.sqrt(3) * fine;
+  const min: Vec3 = [R, R, R], max: Vec3 = [-R, -R, -R], p: Vec3 = [0, 0, 0];
   let found = false;
-  for (let x = 0; x < 28; x++) for (let y = 0; y < 28; y++) for (let z = 0; z < 28; z++) {
-    p[0] = -R + (x + 0.5) * cell; p[1] = -R + (y + 0.5) * cell; p[2] = -R + (z + 0.5) * cell;
-    if (evaluate(p, values).d <= diagonal) {
-      found = true;
-      for (let i = 0; i < 3; i++) { min[i] = Math.min(min[i], p[i] - 1.5 * cell); max[i] = Math.max(max[i], p[i] + 1.5 * cell); }
+  for (let x = 0; x < C; x++) for (let y = 0; y < C; y++) for (let z = 0; z < C; z++) {
+    p[0] = -R + (x + 0.5) * coarse; p[1] = -R + (y + 0.5) * coarse; p[2] = -R + (z + 0.5) * coarse;
+    if (Math.abs(evaluate(p, values).d) > coarseReach + fineDiag) continue;
+    const cx = p[0], cy = p[1], cz = p[2];
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) for (let k = 0; k < 3; k++) {
+      p[0] = cx + (i - 1) * fine; p[1] = cy + (j - 1) * fine; p[2] = cz + (k - 1) * fine;
+      if (evaluate(p, values).d <= fineDiag) {
+        found = true;
+        for (let a = 0; a < 3; a++) { min[a] = Math.min(min[a], p[a] - 1.5 * fine); max[a] = Math.max(max[a], p[a] + 1.5 * fine); }
+      }
     }
   }
   if (!found) return { min: [-R, -R, -R], max: [R, R, R] };

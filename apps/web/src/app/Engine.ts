@@ -12,6 +12,8 @@ import { QUALITY } from "../rendering/hybrid/types";
 import { NearField, type PickResult } from "../rendering/nearfield/NearField";
 import { GaussianDiagnostic, type GaussianAssetStatus, type GaussianMode } from "../rendering/farfield/GaussianDiagnostic";
 import { FireSystem, type FireSource } from "../rendering/effects/FireSystem";
+import { PostProcess } from "../rendering/post/PostProcess";
+import { Grass } from "../rendering/effects/Grass";
 import { MIN_RENDERABLE_GENERATOR_VERSION, type Companion } from "./api";
 
 export const REGION_SIZE = 64;
@@ -54,6 +56,29 @@ export interface EngineStatus {
 }
 
 const key = (rx: number, rz: number) => `${rx},${rz}`;
+
+/** Grass parameters derived from the world's generated terrain materials (how green the ground is). */
+function grassFor(world: WorldState, groundHeight: (x: number, z: number) => number) {
+  const t = world.spec.terrain;
+  const g = (t.ground_material.base_color ?? [0.3, 0.3, 0.2]) as number[];
+  const sum = g[0] + g[1] + g[2] + 1e-6;
+  const greenness = g[1] / sum;
+  // lush where the ground is green; dry worlds get sparse tufts tinted by their own ground colour; no grass on
+  // near-white (snow) or very dark (lava rock) ground
+  const brightness = sum / 3;
+  let lushness = Math.min(1, Math.max(0, (greenness - 0.34) / 0.1));
+  if (lushness < 0.25) lushness = 0.18;
+  if (brightness > 0.75 || brightness < 0.04) lushness = 0;
+  const tint: [number, number, number] = greenness > 0.36 ? [0.95, 1.08, 0.88] : [1.06, 1.0, 0.86];
+  return {
+    seed: world.seed >>> 0,
+    groundHeight,
+    waterLevel: (t.water_level ?? null) as number | null,
+    peakHeight: t.peak_material ? (t.peak_height ?? null) as number | null : null,
+    lushness,
+    tint,
+  };
+}
 const CLIP_MARGIN_M = 2;
 
 /** Metadata of a capture session: everything of the view bundle except the pixels (see services/gpu/bundle.py). */
@@ -96,11 +121,18 @@ export class Engine implements HybridFrame {
   private readonly gaussianBackground = new THREE.Color(0x1b1e24);
   readonly player: Player;
   readonly fire: FireSystem;
+  readonly post: PostProcess;
+  readonly grass: Grass;
+  /** HDR post-processing (bloom, light shafts, tone mapping, FXAA) for the normal view; off for debug views */
+  postEnabled = true;
+  private lastRipple = 0;
   private fireSources: FireSource[] = [];
   /** developer mode: fly camera, diagnostics and neural tools */
   devMode = false;
   /** landing-page camera orbit around this point (null = normal first-person play) */
   attract: THREE.Vector3 | null = null;
+  /** progress messages while a world opens (shown on the loading screen) */
+  onProgress: ((stage: string) => void) | null = null;
   /** called once per frame before rendering (gameplay layer) */
   onFrame: ((dt: number) => void) | null = null;
   /** called for every entity replaced by a server-confirmed state */
@@ -142,6 +174,9 @@ export class Engine implements HybridFrame {
     this.gaussians = new GaussianDiagnostic(this.renderer, this.scene);
     this.fire = new FireSystem(this.near.target.depthTexture!);
     this.scene.add(this.fire.group);
+    this.post = new PostProcess(this.renderer);
+    this.grass = new Grass(this.near.target.texture);
+    this.scene.add(this.grass.mesh);
   }
 
   setDevMode(on: boolean): void {
@@ -225,7 +260,9 @@ export class Engine implements HybridFrame {
     this.near.clearPreviews();
     this.gaussians.clear();
     this.assetsLoading.clear();
-    this.near.setWorld(world);
+    this.onProgress?.("Compiling the world's geometry for the GPU…");
+    await this.near.setWorld(world);
+    this.grass.setWorld(grassFor(world, (x, z) => this.near.groundHeight(x, z)));
     const parity = this.near.terrainParity();
     this.terrainParity = Number.isFinite(parity.maxError) ? parity.maxError : null;
     const p = world.player.position as number[];
@@ -512,10 +549,17 @@ export class Engine implements HybridFrame {
         if (this.entitiesDirty) this.pushEntities();
 
         this.time += dt;
+        // ripples where the player moves through water
+        const pl = this.player;
+        if (pl.waterContact !== null && pl.speed > 0.6 && now - this.lastRipple > 280) {
+          this.lastRipple = now;
+          this.near.addRipple(pl.position.x, pl.position.z, pl.locomotion === "swimming" ? 1.2 : 0.7);
+        }
         this.onFrame?.(dt);
         this.fire.wind = (this.world.environment.wind ?? [1, 0]) as [number, number];
         this.fire.setView(this.camera, w, h);
         this.fire.update(dt, this.time, this.fireSources);
+        this.grass.update(this.camera, this.player.position, this.time, (this.world.environment.wind ?? [1, 0]) as [number, number], this.near.sky.sunDir);
         this.renderFrame(w, h);
         this.frames += 1;
 
@@ -549,9 +593,26 @@ export class Engine implements HybridFrame {
       composite.visible = true;
       this.scene.background = null;
       this.near.renderToTarget(this.camera);
+      const post = this.postEnabled && this.debugView === "final";
+      this.near.setLinearOutput(post);
+      if (!post) {
+        this.renderer.render(this.scene, this.camera);
+        return;
+      }
+      this.post.setSize(w, h);
+      this.grass.mesh.visible = this.near.ready;
+      this.renderer.setRenderTarget(this.post.hdr);
       this.renderer.render(this.scene, this.camera);
+      this.renderer.setRenderTarget(null);
+      const sky = this.near.sky;
+      // night scenes are exposed up (eyes adapt) so emissive objects read as glowing against a dark world
+      const exposure = 1.05 + 1.4 * (1 - sky.daylight);
+      // the bloom chain sums five scales, so a small weight already gives a soft halo
+      this.post.render(this.camera, { exposure, bloom: 0.045, shafts: 0.6, sunWorldDir: sky.sunDir, sunColor: sky.sun }, 1 / 60);
       return;
     }
+    this.near.setLinearOutput(false);
+    this.grass.mesh.visible = false;
     if (this.gaussianMode === "gaussian") {
       composite.visible = false;
       this.gaussians.setVisible(true);

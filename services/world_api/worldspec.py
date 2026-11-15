@@ -9,13 +9,17 @@ from __future__ import annotations
 import json
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from greality_contracts import (
     EnvironmentState,
     EntityState,
     FeatureSpec,
     GeometryDefinition,
+    InteractionCondition,
+    InteractionEffect,
+    InteractionSpec,
+    ObjectBehavior,
     MaterialDefinition,
     TerrainDefinition,
     WorldSpec,
@@ -55,6 +59,52 @@ class ParamDraft(BaseModel):
     max: float
 
 
+class ConditionDraft(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    var: Optional[str] = Field(default=None, description="state variable to test, or null to test `condition`")
+    op: Literal["<", "<=", ">", ">=", "==", "!="] = ">="
+    value: float = 0.0
+    condition: Optional[Literal["intact", "burning", "charred", "removed"]] = None
+
+
+class EffectDraft(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    type: Literal["set_var", "add_var", "set_param", "scale_param", "set_condition", "ignite", "emit", "give",
+                  "trigger_nearby"]
+    var: Optional[str] = None
+    param: Optional[str] = Field(default=None, description="a geometry parameter declared in `parameters`")
+    value: float = 0.0
+    min: float = -1000.0
+    max: float = 1000.0
+    condition: Optional[Literal["intact", "charred", "removed"]] = None
+    particles: Optional[Literal["sparks", "spores", "dust", "smoke", "embers", "glow"]] = None
+    color: Optional[list[float]] = None
+    count: int = 0
+    resource: Optional[str] = None
+    amount: int = 0
+    radius_m: float = 0.0
+    max_targets: int = 0
+    same_kind: bool = True
+    interaction: Optional[str] = None
+
+
+class InteractionDraft(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(description="lowercase identifier, e.g. harvest, strike, resonate")
+    verb: str = Field(description="1-3 word prompt shown as 'E - <verb>?', e.g. 'Harvest spores'")
+    range_m: float = 4.0
+    player_initiated: bool = True
+    requires: list[ConditionDraft] = Field(default_factory=list)
+    effects: list[EffectDraft] = Field(default_factory=list)
+    message: str = ""
+
+
+class VarDraft(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    value: float
+
+
 class ObjectDraft(BaseModel):
     """A new kind of object whose geometry the model constructs from the SDF operation language."""
 
@@ -67,6 +117,9 @@ class ObjectDraft(BaseModel):
                                          description="0-3 per-entity shape parameters, sampled uniformly per entity")
     size_m: float = Field(default=4.0, description="radius of a sphere around the base origin that contains the object")
     flammable: bool = False
+    physical_material: str = Field(default="", description="e.g. wood, crystal, stone, fungus, metal")
+    vars: list[VarDraft] = Field(default_factory=list, description="initial state variables (0-6), e.g. emission 1")
+    interactions: list[InteractionDraft] = Field(default_factory=list, description="0-3 player interactions")
     placement: Placement = "everywhere"
     density_per_hectare: float = Field(default=0.0, description="for scattered objects, 1-200")
     count: int = Field(default=0, description="for a fixed number of large objects, 1-40")
@@ -94,6 +147,7 @@ class WorldDraft(BaseModel):
     wind_south_mps: float = 0.0
     temperature_c: float = 18.0
     ambient_light: float = Field(default=0.25, description="0.03 = very dark night, 0.25 = day")
+    cloud_cover: float = Field(default=0.35, description="0 clear sky .. 1 overcast")
     features: list[FeatureDraft] = Field(default_factory=list)
     objects: list[ObjectDraft] = Field(default_factory=list, description="newly constructed object kinds")
     unsupported: list[str] = Field(default_factory=list, description="requested things that cannot be represented")
@@ -198,6 +252,50 @@ def object_geometry(obj: ObjectDraft, index: int) -> GeometryDefinition:
     })
 
 
+def object_behavior(obj: ObjectDraft, geom: GeometryDefinition, notes: list[str]) -> ObjectBehavior:
+    """Validate a model-composed behaviour against its own geometry. Invalid interactions are dropped with a note;
+    nothing in a behaviour is code: the server executes it with world_api.interactions (a closed grammar)."""
+    vars_ = {}
+    for v in obj.vars[:6]:
+        name = _slug(v.name)
+        vars_[name] = _clamp(v.value, -1000, 1000)
+    if any(m.emissive_strength > 0 for m in geom.materials) and "emission" not in vars_:
+        vars_["emission"] = 1.0  # the renderer multiplies an entity's glow and light by this variable
+    ids = {_slug(i.id) for i in obj.interactions[:3]}
+    out: list[InteractionSpec] = []
+    for it in obj.interactions[:3]:
+        try:
+            effects = []
+            for e in it.effects[:8]:
+                d = e.model_dump()
+                for key in ("var", "param", "resource", "interaction"):
+                    if d.get(key):
+                        d[key] = _slug(d[key])
+                if d["type"] in ("set_param", "scale_param") and d.get("param") not in geom.parameters:
+                    raise ValueError(f"effect changes '{d.get('param')}' which the geometry does not declare")
+                if d["type"] == "trigger_nearby" and d.get("interaction") not in ids:
+                    raise ValueError(f"trigger_nearby names unknown interaction '{d.get('interaction')}'")
+                if d.get("color") is not None:
+                    d["color"] = _color(d["color"])
+                d["count"] = int(_clamp(d.get("count") or 0, 0, 400))
+                d["amount"] = int(_clamp(d.get("amount") or 0, 0, 100))
+                d["radius_m"] = _clamp(d.get("radius_m") or 0, 0, 30)
+                d["max_targets"] = int(_clamp(d.get("max_targets") or 0, 0, 8))
+                effects.append(InteractionEffect.model_validate(d))
+            requires = []
+            for c in it.requires[:4]:
+                cd = c.model_dump()
+                if cd.get("var"):
+                    cd["var"] = _slug(cd["var"])
+                requires.append(InteractionCondition.model_validate(cd))
+            out.append(InteractionSpec(id=_slug(it.id), verb=it.verb.strip()[:24] or "Use",
+                                       range_m=_clamp(it.range_m, 0.5, 10.0), player_initiated=it.player_initiated,
+                                       requires=requires, effects=effects, message=it.message[:160]))
+        except (ValueError, ValidationError) as exc:
+            notes.append(f"interaction '{it.id}' of '{obj.name[:30]}' dropped: {str(exc)[:140]}")
+    return ObjectBehavior(vars=vars_, interactions=out, material=_slug(obj.physical_material)[:32] if obj.physical_material else "")
+
+
 def _state_for(profile: dict, geom) -> dict:
     """Initial state; fuel of generated trees grows with their size (bigger trees burn longer)."""
     state = dict(profile["state"])
@@ -250,6 +348,7 @@ def build_spec(draft: WorldDraft, prompt: str, seed: int) -> WorldSpec:
         wind=wind,
         temperature_c=_clamp(draft.temperature_c, -60.0, 60.0),
         ambient=_clamp(draft.ambient_light, 0.02, 1.0),
+        cloud_cover=_clamp(draft.cloud_cover, 0.0, 1.0),
     )
 
     lib = library()
@@ -315,12 +414,14 @@ def build_spec(draft: WorldDraft, prompt: str, seed: int) -> WorldSpec:
 
     # objects constructed by the language model from the geometry language (no predefined families involved)
     scene_nodes = 0
+    behaviors: dict[str, ObjectBehavior] = {}
     for j, obj in enumerate(draft.objects[:8]):
         try:
             geom = object_geometry(obj, j)
         except ValueError as exc:
             notes.append(f"object '{obj.name[:40]}' rejected by the geometry validator: {str(exc)[:160]}")
             continue
+        behavior = object_behavior(obj, geom, notes)
         scene_nodes += _count_nodes(geom.root)
         if scene_nodes > SCENE_MAX_OBJECT_NODES:
             notes.append(f"object '{obj.name[:40]}' skipped: scene geometry budget of {SCENE_MAX_OBJECT_NODES} nodes reached")
@@ -355,9 +456,11 @@ def build_spec(draft: WorldDraft, prompt: str, seed: int) -> WorldSpec:
             param_ranges={k: (v.min, v.max) for k, v in geom.parameters.items() if k != "burn"},
             capabilities=caps,
             initial_state=EntityState(fuel=round(min(80.0, 15.0 + geom.bound_radius * 4.0), 1) if obj.flammable else 0.0,
-                                      blocks_path=geom.bound_radius > 2.0),
+                                      blocks_path=geom.bound_radius > 2.0, vars=behavior.vars),
         ))
         generated[geom.id] = geom
+        if behavior.interactions or behavior.vars:
+            behaviors[geom.id] = behavior
         notes.append(f"constructed '{obj.name[:40]}' from {_count_nodes(geom.root)} geometry nodes")
 
     spawn_y = terrain_height(terrain, seed, *spawn_xz) + 1.7
@@ -368,6 +471,7 @@ def build_spec(draft: WorldDraft, prompt: str, seed: int) -> WorldSpec:
         terrain=terrain,
         environment=env,
         archetypes=list(generated.values()),
+        behaviors=behaviors,
         features=features,
         spawn=(spawn_xz[0], spawn_y, spawn_xz[1]),
     )

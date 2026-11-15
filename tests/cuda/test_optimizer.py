@@ -22,6 +22,7 @@ from gpu.ply import decode_ply  # noqa: E402
 from gpu.rasterizers.torch_tiles import Camera, TorchTileRasterizer  # noqa: E402
 
 pytestmark = pytest.mark.cuda
+pytest.importorskip("PIL")  # the optimizer writes held-out comparison images; the WSL GPU venv has Pillow
 @pytest.fixture(autouse=True)
 def _restore_memory_fraction():
     yield

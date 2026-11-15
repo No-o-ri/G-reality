@@ -7,7 +7,16 @@
  */
 
 /** Hashes and value noise. hash12/vnoise2 are `terrain-v1`; hash13/vnoise3/fbm3 are `value-fbm-v1`. */
-export const NOISE_GLSL = /* glsl */ `
+// Loops start at ZERO, a value the compiler cannot prove constant (the march shader defines it from a uniform that is
+// always 0). This stops Direct3D's HLSL compiler (Chrome / ANGLE on Windows) from unrolling loops and inlining every
+// call site, which with model-generated geometry made world shaders take minutes to compile.
+const ZERO_DEFAULT = `
+#ifndef ZERO
+#define ZERO 0
+#endif
+`;
+
+export const NOISE_GLSL = /* glsl */ `${ZERO_DEFAULT}
 // Integer lattice hash: exact on every platform (GLSL uint, Python, TypeScript). A float hash such as
 // fract(sin(..)) or Hoskins' hash amplifies 1-ulp rounding differences between GPU and CPU into
 // ~1e-3 output differences, which showed up as a 15 cm terrain mismatch; integer arithmetic does not.
@@ -60,7 +69,7 @@ float fbm3(vec3 p, int octaves, float seed) {
   float sum = 0.0;
   float amp = 1.0;
   float scale = 1.0;
-  for (int i = 0; i < 5; i++) {
+  for (int i = ZERO; i < 5; i++) {
     if (i >= octaves) break;
     sum += amp * (2.0 * vnoise3(p * scale, seed) - 1.0);
     amp *= 0.5;
@@ -76,7 +85,7 @@ vec3 warp3(vec3 p, float amplitude, float frequency, float seed) {
 `;
 
 /** Primitive, boolean and domain operations. Units are meters; all primitives are centered unless noted. */
-export const SDF_GLSL = /* glsl */ `
+export const SDF_GLSL = /* glsl */ `${ZERO_DEFAULT}
 float sdSphere(vec3 p, float r) { return length(p) - r; }
 // Bound-corrected approximation (not an exact distance).
 float sdEllipsoid(vec3 p, vec3 r) {
@@ -93,7 +102,7 @@ float sdRoundBox(vec3 p, vec3 b, float r) { return sdBox(p, b) - r; }
 float sdCurveTube(vec3 p, vec3 a, vec3 b, vec3 c, float ra, float rb) {
   float d = 1e9;
   vec3 prev = a;
-  for (int i = 1; i <= 8; i++) {
+  for (int i = ZERO + 1; i <= 8; i++) {
     float t = float(i) / 8.0;
     vec3 q = mix(mix(a, b, t), mix(b, c, t), t);
     vec3 pa = p - prev;
@@ -193,7 +202,7 @@ vec3 opBend(vec3 p, float rate) {
  * `octaves` may be lower than uTerrainOctaves for distant samples: the normalisation always uses the
  * full octave count, so dropping octaves only removes fine detail and never shifts the large shape.
  */
-export const TERRAIN_GLSL = /* glsl */ `
+export const TERRAIN_GLSL = /* glsl */ `${ZERO_DEFAULT}
 uniform vec4 uTerrainA;      // base_height, amplitude, frequency, ridge
 uniform vec4 uTerrainB;      // warp, octaves, norm (sum of 0.5^i), water_level (or -1e9)
 uniform vec4 uTerrainBasin;  // center.x, center.z, radius (0 = none), depth
@@ -213,7 +222,7 @@ float terrainHeightLod(vec2 xz, int octaves) {
   float ridgedSum = 0.0;
   float amp = 1.0;
   float scale = 1.0;
-  for (int i = 0; i < 8; i++) {
+  for (int i = ZERO; i < 8; i++) {
     if (i >= octaves) break;
     float n = vnoise2(f * scale + vec2(17.0 * float(i)), uSeedOffset);
     float s = 2.0 * n - 1.0;

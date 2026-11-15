@@ -85,6 +85,7 @@
     },
     "ActionType": {
       "enum": [
+        "interact",
         "ignite",
         "extinguish",
         "remove",
@@ -394,6 +395,15 @@
           "description": "harvestable yield, e.g. {'wood': 4}",
           "title": "Resources",
           "type": "object"
+        },
+        "vars": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "description": "named state of generated interactions, e.g. emission, charge, spores",
+          "maxProperties": 8,
+          "title": "Vars",
+          "type": "object"
         }
       },
       "title": "EntityState",
@@ -407,6 +417,14 @@
           "maximum": 2.0,
           "minimum": 0.0,
           "title": "Ambient",
+          "type": "number"
+        },
+        "cloud_cover": {
+          "default": 0.35,
+          "description": "0 clear .. 1 overcast",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Cloud Cover",
           "type": "number"
         },
         "fog_base_height": {
@@ -569,6 +587,7 @@
         "fire_spread",
         "entity_burned_out",
         "entity_extinguished",
+        "entity_interacted",
         "entity_removed",
         "entity_built",
         "resource_changed",
@@ -997,6 +1016,314 @@
         "queue_depth"
       ],
       "title": "HealthReport",
+      "type": "object"
+    },
+    "InteractionCondition": {
+      "additionalProperties": false,
+      "description": "Guard on the acting entity: a state variable compared with a value, or its condition.",
+      "properties": {
+        "condition": {
+          "anyOf": [
+            {
+              "enum": [
+                "intact",
+                "burning",
+                "charred",
+                "removed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        },
+        "op": {
+          "default": ">=",
+          "enum": [
+            "<",
+            "<=",
+            ">",
+            ">=",
+            "==",
+            "!="
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "default": 0.0,
+          "title": "Value",
+          "type": "number"
+        },
+        "var": {
+          "anyOf": [
+            {
+              "maxLength": 24,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "state variable; None = use `condition`",
+          "title": "Var"
+        }
+      },
+      "title": "InteractionCondition",
+      "type": "object"
+    },
+    "InteractionEffect": {
+      "additionalProperties": false,
+      "description": "One state transition. Fields used depend on `type` (unused fields are ignored).",
+      "properties": {
+        "amount": {
+          "default": 0,
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Amount",
+          "type": "integer"
+        },
+        "color": {
+          "anyOf": [
+            {
+              "maxItems": 3,
+              "minItems": 3,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color"
+        },
+        "condition": {
+          "anyOf": [
+            {
+              "enum": [
+                "intact",
+                "charred",
+                "removed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Condition"
+        },
+        "count": {
+          "default": 0,
+          "maximum": 400,
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "interaction": {
+          "anyOf": [
+            {
+              "maxLength": 24,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interaction"
+        },
+        "max": {
+          "default": 1000.0,
+          "title": "Max",
+          "type": "number"
+        },
+        "max_targets": {
+          "default": 0,
+          "maximum": 8,
+          "minimum": 0,
+          "title": "Max Targets",
+          "type": "integer"
+        },
+        "min": {
+          "default": -1000.0,
+          "title": "Min",
+          "type": "number"
+        },
+        "param": {
+          "anyOf": [
+            {
+              "maxLength": 24,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Param"
+        },
+        "particles": {
+          "anyOf": [
+            {
+              "enum": [
+                "sparks",
+                "spores",
+                "dust",
+                "smoke",
+                "embers",
+                "glow"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Particles"
+        },
+        "radius_m": {
+          "default": 0.0,
+          "maximum": 30.0,
+          "minimum": 0.0,
+          "title": "Radius M",
+          "type": "number"
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "maxLength": 24,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource"
+        },
+        "same_kind": {
+          "default": true,
+          "title": "Same Kind",
+          "type": "boolean"
+        },
+        "type": {
+          "enum": [
+            "set_var",
+            "add_var",
+            "set_param",
+            "scale_param",
+            "set_condition",
+            "ignite",
+            "emit",
+            "give",
+            "trigger_nearby"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "value": {
+          "default": 0.0,
+          "title": "Value",
+          "type": "number"
+        },
+        "var": {
+          "anyOf": [
+            {
+              "maxLength": 24,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Var"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "InteractionEffect",
+      "type": "object"
+    },
+    "InteractionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "effects": {
+          "items": {
+            "$ref": "#/$defs/InteractionEffect"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Effects",
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 24,
+          "minLength": 1,
+          "pattern": "^[a-z0-9_]+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 160,
+          "title": "Message",
+          "type": "string"
+        },
+        "player_initiated": {
+          "default": true,
+          "description": "False = only reachable through trigger_nearby",
+          "title": "Player Initiated",
+          "type": "boolean"
+        },
+        "range_m": {
+          "default": 4.0,
+          "maximum": 10.0,
+          "minimum": 0.5,
+          "title": "Range M",
+          "type": "number"
+        },
+        "requires": {
+          "items": {
+            "$ref": "#/$defs/InteractionCondition"
+          },
+          "maxItems": 4,
+          "title": "Requires",
+          "type": "array"
+        },
+        "verb": {
+          "description": "player prompt: 'E - <verb>?'",
+          "maxLength": 24,
+          "minLength": 1,
+          "title": "Verb",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "verb",
+        "effects"
+      ],
+      "title": "InteractionSpec",
       "type": "object"
     },
     "JobState": {
@@ -1511,6 +1838,37 @@
         "train_seconds"
       ],
       "title": "NeuralMetrics",
+      "type": "object"
+    },
+    "ObjectBehavior": {
+      "additionalProperties": false,
+      "description": "Generated behaviour of one archetype: initial state variables and the interactions it supports.",
+      "properties": {
+        "interactions": {
+          "items": {
+            "$ref": "#/$defs/InteractionSpec"
+          },
+          "maxItems": 4,
+          "title": "Interactions",
+          "type": "array"
+        },
+        "material": {
+          "default": "",
+          "description": "physical material, e.g. wood, crystal, stone",
+          "maxLength": 32,
+          "title": "Material",
+          "type": "string"
+        },
+        "vars": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "maxProperties": 8,
+          "title": "Vars",
+          "type": "object"
+        }
+      },
+      "title": "ObjectBehavior",
       "type": "object"
     },
     "ParamSpec": {
@@ -2272,6 +2630,20 @@
           "default": null,
           "title": "Expected World Revision"
         },
+        "interaction": {
+          "anyOf": [
+            {
+              "maxLength": 24,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "with action=interact: id of the generated interaction to perform",
+          "title": "Interaction"
+        },
         "player_id": {
           "maxLength": 64,
           "minLength": 1,
@@ -2626,9 +2998,17 @@
           "items": {
             "$ref": "#/$defs/GeometryDefinition"
           },
-          "maxItems": 24,
+          "maxItems": 64,
           "title": "Archetypes",
           "type": "array"
+        },
+        "behaviors": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ObjectBehavior"
+          },
+          "description": "geometry_id -> generated behaviour",
+          "title": "Behaviors",
+          "type": "object"
         },
         "environment": {
           "$ref": "#/$defs/EnvironmentState"
@@ -2637,7 +3017,7 @@
           "items": {
             "$ref": "#/$defs/FeatureSpec"
           },
-          "maxItems": 32,
+          "maxItems": 96,
           "title": "Features",
           "type": "array"
         },

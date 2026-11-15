@@ -29,6 +29,7 @@ from greality_contracts import (
     GenerationStatus,
     JobState,
     MutationResult,
+    ObjectBehavior,
     NeuralAssetManifest,
     NeuralGenerationJob,
     NeuralMetrics,
@@ -50,7 +51,7 @@ from greality_contracts import (
     WorldSync,
 )
 
-from . import simulation
+from . import interactions, simulation
 from .actions import ACTIONS, ActionContext, distance, evaluate
 from .interpreter import CommandContext, IntentDraft, Interpreter, InterpreterError, RulesInterpreter
 from .regions import GENERATOR_VERSION, generate_region, region_of, regions_touching, sphere_aabb
@@ -382,6 +383,9 @@ class WorldService:
                                    (cmd.world_id, candidate.id)).fetchone()
                 target = _entity_from_row(trow) if trow else None
 
+            if draft.action == "interact":
+                return self._commit_interaction(cur, cmd, target, player, gameplay, base_revision, resolved_by)
+
             failures: list[PreconditionFailure] = []
             action_def = None
             if draft.action == "unknown" or ActionType(draft.action) not in ACTIONS:
@@ -447,6 +451,78 @@ class WorldService:
             if revision // SNAPSHOT_EVERY != base_revision // SNAPSHOT_EVERY:
                 self._write_snapshot(cur, cmd.world_id, revision, gameplay.tick)
             return result
+
+    def _commit_interaction(self, cur, cmd: WorldCommand, target: Optional[WorldEntity], player: PlayerState,
+                            gameplay: GameplayState, base_revision: int, resolved_by: str) -> MutationResult:
+        """Execute a generated (model-composed, schema-validated) interaction on the target, server-side.
+
+        The behaviour comes from the world's stored spec, never from the client: the command only names the target
+        and the interaction id. Range, guards, neighbour selection and every state change are decided here, under the
+        world lock, by the closed grammar in interactions.py; the result is persisted like any other mutation.
+        """
+        intent = ParsedIntent(action=ActionType.interact, target_kind=target.kind if target else None,
+                              interpreter="direct", confidence=1.0)
+
+        def reject(code: str, message: str) -> MutationResult:
+            failure = PreconditionFailure(code=code, message=message)
+            result = MutationResult(status="rejected", command_id=cmd.command_id, world_revision=base_revision,
+                                    message=message, failures=[failure])
+            self._store_command(cur, cmd, intent, result)
+            return result
+
+        if target is None or target.state.condition.value == "removed":
+            return reject("no_target", "There is nothing here to interact with.")
+        w = cur.execute("SELECT seed, spec->'behaviors' AS behaviors FROM worlds WHERE world_id=%s",
+                        (cmd.world_id,)).fetchone()
+        behaviors = {k: ObjectBehavior.model_validate(v) for k, v in (w["behaviors"] or {}).items()}
+        behavior = behaviors.get(target.geometry_id)
+        spec = next((i for i in (behavior.interactions if behavior else [])
+                     if i.id == cmd.interaction and i.player_initiated), None)
+        if spec is None:
+            return reject("unknown_action", f"The {target.kind} has no interaction '{cmd.interaction}'.")
+        dist = distance(cmd.player_position, target.transform.position)
+        reach = spec.range_m + min(target.bound_radius, 3.0) * 0.5
+        if dist > reach:
+            return reject("out_of_range", f"The {target.kind} is {dist:.1f} m away; get within {reach:.1f} m.")
+        reasons = interactions.check(spec, target)
+        if reasons:
+            return reject("invalid_state", reasons[0])
+        neighbours: list[WorldEntity] = []
+        radius = max((e.radius_m for e in spec.effects if e.type == "trigger_nearby"), default=0.0)
+        if radius > 0:
+            here = target.region
+            rows = cur.execute(
+                """SELECT * FROM entities WHERE world_id=%s AND rx BETWEEN %s AND %s AND rz BETWEEN %s AND %s
+                   AND condition <> 'removed'""",
+                (cmd.world_id, here.rx - 1, here.rx + 1, here.rz - 1, here.rz + 1)).fetchall()
+            neighbours = [_entity_from_row(r) for r in rows if r["entity_id"] != target.id]
+        try:
+            effects, new_player, _ = interactions.perform(spec, target, behaviors, neighbours, player,
+                                                          gameplay.tick, w["seed"])
+        except interactions.InteractionError as exc:
+            return reject("invalid_state", str(exc))
+        known = {e.id: e for e in neighbours}
+        known[target.id] = target
+        if new_player is not None:
+            for eff in effects:
+                eff.player = new_player
+        revision, events, changed, dirty, _ = self._persist_effects(
+            cur, cmd.world_id, effects, base_revision, gameplay.tick, "player", cmd.command_id, known,
+            player, cmd.player_id)
+        cur.execute("UPDATE worlds SET revision=%s, updated_at=now() WHERE world_id=%s", (revision, cmd.world_id))
+        validated = ValidatedAction(
+            command_id=cmd.command_id, intent=intent,
+            target=ResolvedTarget(entity_id=target.id, kind=target.kind, position=target.transform.position,
+                                  distance_m=dist, region=target.region, resolved_by=resolved_by),
+            preconditions=ActionPreconditions(max_range_m=reach, in_range=True, has_capability=True, state_ok=True,
+                                              failures=[]),
+            base_world_revision=base_revision)
+        result = MutationResult(
+            status="committed", command_id=cmd.command_id, world_revision=revision,
+            message=" ".join(e.message for e in effects if e.message) or f"You {spec.verb.lower()} the {target.kind}.",
+            action=validated, events=events, entities=list(changed.values()), dirty_regions=list(dirty.values()))
+        self._store_command(cur, cmd, intent, result)
+        return result
 
     def _persist_effects(self, cur, world_id: str, effects: list, base_revision: int, tick: int, cause: str,
                          command_id: Optional[str], known: dict[str, WorldEntity],

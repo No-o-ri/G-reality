@@ -45,7 +45,7 @@ export interface NearFieldStats {
 
 export interface NearFieldRenderer {
   /** (Re)compile the SDF program for a world: terrain, environment and archetype functions. */
-  setWorld(world: WorldState): void;
+  setWorld(world: WorldState): Promise<void>;
   /** Replace the instance set. Cheap: rewrites data textures, never recompiles. */
   setEntities(entities: WorldEntity[]): void;
   setQuality(profile: QualityProfile): void;

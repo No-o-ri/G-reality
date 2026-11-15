@@ -72,6 +72,20 @@ radii, bend/twist rates, cap sizes) so every placed entity is geometrically diff
 Placement: density_per_hectare (2-150) for scattered objects or count (1-30) for large landmarks; size_m = radius of a
 sphere around the base that contains the object at scale 1; placements: everywhere, lowlands, highlands, lakeshore,
 east_shore, west_shore, near_spawn. flammable = true for plants and wooden things.
+BEHAVIOUR. Give objects distinctive, fitting interactions composed from this closed grammar (no code):
+  vars: initial state variables (name, value), e.g. emission 1 for glowing things, charge, spores, cracks.
+  interactions[] (0-3 per object): {id, verb (prompt text, 1-3 words), range_m (1-8), player_initiated,
+    requires: [{var, op, value} or {condition: intact|burning|charred|removed, op: "=="|"!="}],
+    effects: [...], message (feedback sentence)}.
+  effect types: set_var {var, value}; add_var {var, value (delta), min, max}; set_param / scale_param {param (one of
+    the object's own `parameters`), value or factor, min, max} (changes its geometry); set_condition {condition:
+    intact|charred|removed}; ignite (flammable objects catch fire; fire spreads by itself); emit {particles: sparks|
+    spores|dust|smoke|embers|glow, color, count 10-200}; give {resource, amount}; trigger_nearby {radius_m <= 30,
+    max_targets <= 8, same_kind, interaction (id of a player_initiated=false interaction of this object that runs on
+    the neighbours)}. The variable `emission` scales an object's glow and emitted light (0 = dark, 2 = twice as bright).
+Make behaviour fit the object: e.g. something fragile can shatter (set_condition removed + emit), something luminous
+can flare and wake its neighbours (add_var emission + trigger_nearby), something growing can be harvested
+(requires + add_var + scale_param + give + emit). Use requires to stop actions repeating forever.
 List in `unsupported` only what truly cannot be built (moving creatures, liquids flowing, text)."""
 
 COMMAND_SYSTEM = """You translate a player's typed command in a 3D world into one structured intent.
@@ -93,14 +107,14 @@ class GeminiInterpreter:
 
         self._types = types
         self._client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=TIMEOUT_MS))
-        self._world_client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=WORLD_TIMEOUT_MS))
         self.preferred = model
         self.last_model: str | None = None  # which model produced the most recent answer
 
     def _models(self, defaults: tuple[str, ...]) -> list[str]:
         return list(dict.fromkeys(([self.preferred] if self.preferred else []) + list(defaults)))
 
-    def _generate(self, system: str, user: str, schema: type[T], temperature: float, models: list[str], client=None) -> T:
+    def _generate(self, system: str, user: str, schema: type[T], temperature: float, models: list[str],
+                  timeout_ms: int | None = None) -> T:
         from google.genai import errors
 
         config = self._types.GenerateContentConfig(
@@ -109,11 +123,13 @@ class GeminiInterpreter:
             response_schema=schema,
             temperature=temperature,
             max_output_tokens=12000,
+            # per-request deadline: geometry-writing world answers are long, commands are short
+            http_options=self._types.HttpOptions(timeout=timeout_ms) if timeout_ms else None,
         )
         last: InterpreterError | None = None
         for attempt, model in enumerate(models):
             try:
-                response = (client or self._client).models.generate_content(model=model, contents=user, config=config)
+                response = self._client.models.generate_content(model=model, contents=user, config=config)
             except ValidationError as exc:  # the SDK rejected our request locally (e.g. unsupported schema type)
                 raise InterpreterError(
                     "misconfigured", f"Gemini request could not be built ({exc.error_count()} schema problem(s)).") from None
@@ -147,7 +163,7 @@ class GeminiInterpreter:
         raise last
 
     def world(self, prompt: str) -> WorldDraft:
-        draft = self._generate(WORLD_SYSTEM, prompt[:2000], WorldDraft, 0.7, self._models(WORLD_MODELS), self._world_client)
+        draft = self._generate(WORLD_SYSTEM, prompt[:2000], WorldDraft, 0.7, self._models(WORLD_MODELS), WORLD_TIMEOUT_MS)
         # validator-driven repair: send the exact validation errors back once and replace the objects that failed
         from ..worldspec import object_geometry
 
@@ -162,7 +178,7 @@ class GeminiInterpreter:
             fix = (f"Original request: {prompt[:1500]}\n\nYour previous answer: {draft.model_dump_json()[:9000]}\n\n"
                    f"These objects failed geometry validation:\n{listing}\n\nReturn the complete corrected JSON.")
             try:
-                repaired = self._generate(WORLD_SYSTEM, fix, WorldDraft, 0.3, self._models(WORLD_MODELS), self._world_client)
+                repaired = self._generate(WORLD_SYSTEM, fix, WorldDraft, 0.3, self._models(WORLD_MODELS), WORLD_TIMEOUT_MS)
                 if len(repaired.objects) >= len(draft.objects) - len(errors):
                     draft = repaired
             except InterpreterError:

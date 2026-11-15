@@ -117,6 +117,47 @@ void main() {
 }
 `;
 
+// Coloured motes for generated interactions (`emit` effects): sparks, spores, dust, glow. Additive, soft, HDR.
+const MOTE_VERT = /* glsl */ `
+attribute float aLife;
+attribute float aSize;
+attribute vec3 aColor;
+varying float vLife;
+varying vec3 vColor;
+varying float vViewZ;
+uniform float uPixelScale;
+void main() {
+  vLife = aLife;
+  vColor = aColor;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vViewZ = -mv.z;
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = aLife < 0.0 ? 0.0 : aSize * uPixelScale / max(0.1, -mv.z);
+}
+`;
+const MOTE_FRAG = /* glsl */ `
+varying float vLife;
+varying vec3 vColor;
+varying float vViewZ;
+uniform sampler2D tDepth;
+uniform vec2 uResolution;
+uniform float uNear;
+uniform float uFar;
+void main() {
+  if (vLife < 0.0) discard;
+  vec2 uv = gl_PointCoord * 2.0 - 1.0;
+  float r = length(uv);
+  float core = exp(-r * r * 6.0);
+  float d = texture2D(tDepth, gl_FragCoord.xy / uResolution).r * 2.0 - 1.0;
+  float scene = 2.0 * uNear * uFar / (uFar + uNear - d * (uFar - uNear));
+  float soft = clamp((scene - vViewZ) / 0.4, 0.0, 1.0);
+  float a = core * smoothstep(0.0, 0.1, vLife) * (1.0 - smoothstep(0.6, 1.0, vLife)) * soft;
+  gl_FragColor = vec4(vColor * a, 1.0);
+}
+`;
+
+export type MoteKind = "sparks" | "spores" | "dust" | "smoke" | "embers" | "glow";
+
 interface Pool {
   points: THREE.Points;
   pos: Float32Array;
@@ -168,6 +209,10 @@ export class FireSystem {
   private readonly smoke: Pool;
   private readonly embers: Pool;
   private readonly accum = new Map<string, { flame: number; smoke: number; ember: number }>();
+  private readonly motes: {
+    points: THREE.Points; pos: Float32Array; vel: Float32Array; life: Float32Array; span: Float32Array;
+    size: Float32Array; color: Float32Array; drag: Float32Array; lift: Float32Array; next: number; capacity: number;
+  };
   wind: [number, number] = [1, 0];
   activeSources = 0;
 
@@ -188,6 +233,62 @@ export class FireSystem {
     this.flames.points.renderOrder = 11;
     this.embers.points.renderOrder = 12;
     this.group.add(this.smoke.points, this.flames.points, this.embers.points);
+    const cap = 2000;
+    const g = new THREE.BufferGeometry();
+    const pos = new Float32Array(cap * 3);
+    const life = new Float32Array(cap).fill(-1);
+    const size = new Float32Array(cap);
+    const color = new Float32Array(cap * 3);
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute("aLife", new THREE.BufferAttribute(life, 1).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute("aSize", new THREE.BufferAttribute(size, 1).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute("aColor", new THREE.BufferAttribute(color, 3).setUsage(THREE.DynamicDrawUsage));
+    const m = new THREE.ShaderMaterial({ vertexShader: MOTE_VERT, fragmentShader: MOTE_FRAG, uniforms: this.uniforms,
+      transparent: true, depthWrite: false, depthTest: true, blending: THREE.CustomBlending });
+    m.blendSrc = THREE.OneFactor;
+    m.blendDst = THREE.OneFactor;
+    const points = new THREE.Points(g, m);
+    points.frustumCulled = false;
+    points.renderOrder = 13;
+    this.group.add(points);
+    this.motes = { points, pos, vel: new Float32Array(cap * 3), life, span: new Float32Array(cap).fill(1), size, color,
+      drag: new Float32Array(cap), lift: new Float32Array(cap), next: 0, capacity: cap };
+  }
+
+  /**
+   * A burst for a committed `emit` effect at a world position. Behaviour per kind is generic physics (speed, drag,
+   * buoyancy, lifetime, glow); the colour comes from the generated behaviour (or a default for the kind).
+   */
+  burst(kind: MoteKind, at: [number, number, number], color: [number, number, number] | null, count: number, height = 1.5): void {
+    if (kind === "smoke" || kind === "embers") {
+      for (let i = 0; i < Math.min(count, 120); i++) {
+        const a = Math.random() * Math.PI * 2;
+        if (kind === "smoke") this.spawn(this.smoke, at[0] + Math.cos(a) * 0.5, at[1] + height * Math.random(), at[2] + Math.sin(a) * 0.5, 0, 1 + Math.random(), 0, 4 + Math.random() * 3, 1.8);
+        else this.spawn(this.embers, at[0], at[1] + height * Math.random(), at[2], Math.cos(a) * 2, 2 + Math.random() * 3, Math.sin(a) * 2, 1.5 + Math.random(), 0.12);
+      }
+      return;
+    }
+    const defaults: Record<string, [number, number, number]> = {
+      sparks: [1.0, 0.85, 0.5], spores: [0.55, 1.0, 0.7], dust: [0.55, 0.5, 0.45], glow: [0.6, 0.8, 1.0],
+    };
+    const c = color ?? defaults[kind];
+    const intensity = kind === "dust" ? 0.25 : kind === "glow" ? 4 : kind === "sparks" ? 6 : 2.5;
+    const M = this.motes;
+    for (let k = 0; k < Math.min(count, 400); k++) {
+      const i = M.next;
+      M.next = (M.next + 1) % M.capacity;
+      const a = Math.random() * Math.PI * 2;
+      const el = Math.random() * Math.PI - Math.PI / 2;
+      const sp = kind === "sparks" ? 4 + Math.random() * 6 : kind === "glow" ? 0.4 : kind === "dust" ? 1 + Math.random() : 0.3 + Math.random() * 0.7;
+      M.pos.set([at[0] + (Math.random() - 0.5) * 0.6, at[1] + height * (0.3 + Math.random() * 0.7), at[2] + (Math.random() - 0.5) * 0.6], i * 3);
+      M.vel.set([Math.cos(a) * Math.cos(el) * sp, Math.abs(Math.sin(el)) * sp + (kind === "spores" ? 0.4 : 0), Math.sin(a) * Math.cos(el) * sp], i * 3);
+      M.life[i] = 0;
+      M.span[i] = kind === "sparks" ? 0.6 + Math.random() * 0.6 : kind === "spores" ? 5 + Math.random() * 5 : kind === "glow" ? 1.2 : 2.5;
+      M.size[i] = kind === "glow" ? 1.8 + Math.random() * 1.5 : kind === "dust" ? 0.5 : kind === "spores" ? 0.12 : 0.07;
+      M.color.set([c[0] * intensity, c[1] * intensity, c[2] * intensity], i * 3);
+      M.drag[i] = kind === "sparks" ? 0.4 : kind === "spores" ? 1.5 : 1.0;
+      M.lift[i] = kind === "sparks" ? -9.0 : kind === "spores" ? 0.15 : kind === "dust" ? -0.6 : 0.0;
+    }
   }
 
   setView(camera: THREE.PerspectiveCamera, depthWidth: number, depthHeight: number, sunColor?: THREE.Vector3): void {
@@ -252,6 +353,26 @@ export class FireSystem {
     this.step(this.flames, dt, 0.25, 0.6, 1.4);
     this.step(this.smoke, dt, 0.6, 0.12, 4.5);
     this.step(this.embers, dt, 0.2, -0.9, 1.0);
+    const M = this.motes;
+    const [wx2, wz2] = this.wind;
+    for (let i = 0; i < M.capacity; i++) {
+      if (M.life[i] < 0) continue;
+      M.life[i] += dt / M.span[i];
+      if (M.life[i] >= 1) {
+        M.life[i] = -1;
+        continue;
+      }
+      const o = i * 3;
+      const drag = M.drag[i];
+      M.vel[o] += (wx2 * 0.2 - M.vel[o]) * drag * dt + (Math.random() - 0.5) * 0.8 * dt;
+      M.vel[o + 1] += M.lift[i] * dt - M.vel[o + 1] * drag * 0.3 * dt;
+      M.vel[o + 2] += (wz2 * 0.2 - M.vel[o + 2]) * drag * dt + (Math.random() - 0.5) * 0.8 * dt;
+      M.pos[o] += M.vel[o] * dt;
+      M.pos[o + 1] += M.vel[o + 1] * dt;
+      M.pos[o + 2] += M.vel[o + 2] * dt;
+    }
+    const mg = M.points.geometry;
+    for (const name of ["position", "aLife", "aSize", "aColor"]) (mg.getAttribute(name) as THREE.BufferAttribute).needsUpdate = true;
   }
 
   /** Integrate one pool: buoyancy (`lift`, m/s² up), drag, size growth over life. */
