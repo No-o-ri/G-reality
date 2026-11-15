@@ -36,6 +36,7 @@
 
     "translate": { "class": "domain", "children": [1, 1], "params": { "offset": { "type": "vec3", "min": -10000, "max": 10000 } } },
     "rotate":    { "class": "domain", "children": [1, 1], "params": { "quat": { "type": "quat" } } },
+    "rotate_axis": { "class": "domain", "children": [1, 1], "params": { "axis": { "type": "vec3", "min": -1, "max": 1 }, "angle": { "type": "scalar", "min": -360, "max": 360 } }, "note": "rotation by angle degrees about the axis through the local origin (axis normalised; a zero axis means no rotation); unlike rotate, the angle may be a parameter reference, so interactions can turn, tilt, open or align parts; isometric, step scale 1" },
     "scale":     { "class": "domain", "children": [1, 1], "params": { "factor": { "type": "scalar", "min": 0.01, "max": 100 } }, "note": "uniform only, distance multiplied by factor (keeps the SDF exact)" },
     "repeat":    { "class": "domain", "children": [1, 1], "params": { "period": { "type": "vec3", "min": 0.05, "max": 1000 }, "count": { "type": "vec3", "min": 0, "max": 64 } }, "note": "limited domain repetition: cell index clamped to [-count, count] per axis; count 0 disables that axis" },
     "radial_repeat": {"class": "domain", "children": [1, 1], "params": {"count": {"type": "scalar", "min": 1, "max": 64}, "offset": {"type": "scalar", "min": 0, "max": 6.2832}}, "note": "polar repetition about +Y; count rounded to integer; required offset in radians; isometric except sector borders, step scale 0.9"},

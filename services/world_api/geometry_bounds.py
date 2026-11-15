@@ -118,6 +118,19 @@ def bounds(node: dict, params: Optional[dict[str, dict]] = None) -> Optional[Box
     if op == "rotate":
         pts = [_rotate(list(p["quat"]), c) for c in _corners(child)]
         return [min(q[i] for q in pts) for i in range(3)], [max(q[i] for q in pts) for i in range(3)]
+    if op == "rotate_axis":
+        ang = p.get("angle")
+        if isinstance(ang, (int, float)):  # fixed angle: rotate the box corners exactly
+            ax = v("axis")
+            n = math.sqrt(sum(c * c for c in ax))
+            if n < 1e-6:
+                return lo, hi
+            half = math.radians(float(ang)) / 2
+            q = [ax[0] / n * math.sin(half), ax[1] / n * math.sin(half), ax[2] / n * math.sin(half), math.cos(half)]
+            pts = [_rotate(q, c) for c in _corners(child)]
+            return [min(t[i] for t in pts) for i in range(3)], [max(t[i] for t in pts) for i in range(3)]
+        r = max(math.sqrt(sum(x * x for x in c)) for c in _corners(child))  # any angle: the sphere around the pivot
+        return [-r, -r, -r], [r, r, r]
     if op == "scale":
         f = s("factor")
         return [c * f for c in lo], [c * f for c in hi]

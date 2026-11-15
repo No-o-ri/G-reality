@@ -167,8 +167,10 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
           return out;
         };
       }
-      case 'radial_repeat': case 'spiral_repeat': case 'taper': case 'stretch': case 'translate': case 'rotate': case 'scale': case 'repeat': case 'mirror': case 'twist': case 'bend': case 'warp': {
+      case 'radial_repeat': case 'spiral_repeat': case 'rotate_axis': case 'taper': case 'stretch': case 'translate': case 'rotate': case 'scale': case 'repeat': case 'mirror': case 'twist': case 'bend': case 'warp': {
         const q: Vec3 = [0, 0, 0];
+        const rotAxis = node.op === 'rotate_axis' ? v('axis') : [];
+        const rotAngle = node.op === 'rotate_axis' ? s('angle') : () => 0;
         const spiralCount = node.op === 'spiral_repeat' ? s('count') : () => 1;
         const spiralPitch = node.op === 'spiral_repeat' ? s('pitch') : () => 0;
         const spiralCopies = node.op === 'spiral_repeat' ? s('copies') : () => 1;
@@ -209,6 +211,15 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
               const j = clamp(rise > 1e-6 ? k + n * Math.floor((p[1] / rise - k) / n + 0.5) : k, 0, total - 1);
               const c = Math.cos(j * sector), sn = Math.sin(j * sector);
               q[0] = c * p[0] + sn * p[2]; q[1] = p[1] - j * rise; q[2] = -sn * p[0] + c * p[2]; break;
+            }
+            case 'rotate_axis': {
+              const ax = rotAxis[0](a), ay = rotAxis[1](a), az = rotAxis[2](a), l = Math.hypot(ax, ay, az);
+              if (l < 1e-6) break;
+              const kx = ax / l, ky = ay / l, kz = az / l, ang = -rotAngle(a) * Math.PI / 180;
+              const c = Math.cos(ang), sn = Math.sin(ang), d = (kx * p[0] + ky * p[1] + kz * p[2]) * (1 - c);
+              q[0] = p[0] * c + (ky * p[2] - kz * p[1]) * sn + kx * d;
+              q[1] = p[1] * c + (kz * p[0] - kx * p[2]) * sn + ky * d;
+              q[2] = p[2] * c + (kx * p[1] - ky * p[0]) * sn + kz * d; break;
             }
             case 'mirror': q[axis] = Math.abs(q[axis]); break;
             case 'repeat': for (let i = 0; i < 3; i++) { const per = period[i](a), c = count[i](a); q[i] -= per * clamp(Math.round(q[i] / per), -c, c); } break;

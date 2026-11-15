@@ -1404,6 +1404,17 @@
           "title": "Roughness",
           "type": "number"
         },
+        "texture": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextureBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "variation": {
           "default": 0.0,
           "description": "procedural tint noise amplitude",
@@ -2444,6 +2455,86 @@
         "slope_material"
       ],
       "title": "TerrainDefinition",
+      "type": "object"
+    },
+    "TextureBinding": {
+      "additionalProperties": false,
+      "description": "A CC0 photo texture set bound to a material when the world (or creation) is made, so the world always shows\nthe same surface. `query` is what the language model asked for; the asset fields are filled when a match was\nfound online (otherwise the material keeps its procedural surface). Image bytes are cached in Neon on first use.",
+      "properties": {
+        "asset_id": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "pattern": "^polyhaven:[a-z0-9_]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Authors",
+          "type": "array"
+        },
+        "license": {
+          "const": "CC0-1.0",
+          "default": "CC0-1.0",
+          "title": "License",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "maxLength": 80,
+          "title": "Name",
+          "type": "string"
+        },
+        "normal_strength": {
+          "default": 1.0,
+          "maximum": 2.0,
+          "minimum": 0.0,
+          "title": "Normal Strength",
+          "type": "number"
+        },
+        "page_url": {
+          "default": "",
+          "maxLength": 200,
+          "title": "Page Url",
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "scale_m": {
+          "default": 2.0,
+          "description": "real-world size of one texture tile",
+          "maximum": 40.0,
+          "minimum": 0.2,
+          "title": "Scale M",
+          "type": "number"
+        },
+        "tint": {
+          "default": 0.35,
+          "description": "0 = photo colours, 1 = recoloured to base_color",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Tint",
+          "type": "number"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "TextureBinding",
       "type": "object"
     },
     "Transform": {

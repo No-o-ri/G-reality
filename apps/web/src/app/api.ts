@@ -126,7 +126,7 @@ export class Companion {
   }
   /** offline=true uses the server's keyword interpreter instead of Gemini (labelled as such in the world). */
   createWorld(prompt: string, offline = false): Promise<WorldState> {
-    return this.request<WorldState>("/v1/worlds", { method: "POST", body: JSON.stringify({ prompt, offline }) }, 300_000);
+    return this.request<WorldState>("/v1/worlds", { method: "POST", body: JSON.stringify({ prompt, offline }) }, 480_000);
   }
   command(cmd: WorldCommand, timeoutMs = 30_000): Promise<MutationResult> {
     return this.request<MutationResult>(`/v1/worlds/${encodeURIComponent(cmd.world_id)}/commands`, { method: "POST", body: JSON.stringify(cmd) }, timeoutMs);
@@ -136,6 +136,14 @@ export class Companion {
   }
   putPlayer(worldId: string, player: PlayerState): Promise<unknown> {
     return this.request(`/v1/worlds/${encodeURIComponent(worldId)}/player`, { method: "PUT", body: JSON.stringify(player) }, 10_000);
+  }
+  /** One map of a CC0 texture set (served from the companion's Neon cache, fetched from Poly Haven on first use). */
+  async fetchTexture(assetId: string, map: "albedo" | "normal" | "arm" | "height"): Promise<Blob> {
+    const response = await fetch(`${this.pairing.url}/v1/textures/${encodeURIComponent(assetId)}/${map}`, {
+      headers: this.pairing.token ? { Authorization: `Bearer ${this.pairing.token}` } : {},
+    });
+    if (!response.ok) throw new ApiFailure(response.status, `http_${response.status}`, `texture ${assetId}/${map}`);
+    return response.blob();
   }
   /** Bytes of a published Gaussian asset (the caller verifies sha256 and region revision before use). */
   async fetchAsset(assetId: string): Promise<ArrayBuffer> {

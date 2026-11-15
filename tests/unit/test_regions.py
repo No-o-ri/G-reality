@@ -52,8 +52,12 @@ def test_generation_invariants(spec, rx, rz):
         x, y, z = entity.transform.position
         assert x0 <= x < x1 and z0 <= z < z1
         assert entity.region == coord == region_of(x, z)
-        assert re.fullmatch(rf"e:{rx}:{rz}:f\d+(?:v\d+)?:(?:n\d+|g-?\d+_-?\d+)", entity.id)
-        assert y == pytest.approx(terrain_height(spec.terrain, 42, x, z), abs=1e-9)
+        assert re.fullmatch(rf"e:{rx}:{rz}:f\d+(?:v\d+)?:(?:n\d+|t-?\d+_-?\d+_\d+|g-?\d+_-?\d+)", entity.id)
+        ground = terrain_height(spec.terrain, 42, x, z)
+        if entity.id.split(":")[-1][0] in "nt":  # v6+: discrete objects sit on the lowest ground under them
+            assert ground - 30.0 <= y <= ground + 1e-9 or y > ground  # (floating objects clear the highest ground)
+        else:
+            assert y == pytest.approx(ground, abs=1e-9)
 
 
 def test_generation_matches_separate_process(spec):

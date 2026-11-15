@@ -22,13 +22,21 @@ T = TypeVar("T", bound=BaseModel)
 
 # Tried in order; a model that is overloaded (503), too slow (504/timeout) or retired (404) is skipped.
 # Verified reachable with this project's key on 2026-11-14. GEMINI_MODEL, if set, is tried first.
-# Geometry: measured 2026-11-14 on the same dreamscape prompt, flash-lite answered in 8 s with 2-5 nodes per object
-# (6 validation/fidelity problems), 3.6-flash in 43 s with every requested structure built (0 problems), 3.8-flash
-# exceeded 120 s. The lite model stays as a fallback; its answers then go through the repair round.
-WORLD_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash")
+# Geometry: measured on the same prompts with the current instructions (first answer, no repair).
+#   2026-11-14 dreamscape: flash-lite 8 s, 2-5 nodes per object, 6 problems; 3.6-flash 43 s, all structures, 0 problems;
+#   3.8-flash > 120 s (timeout).
+#   2026-11-15 dreamscape + 'ring, two spiral towers, islands, arches': 3.6-flash 22-36 s, 5-9 nodes per object, built
+#   one tower for 'two distinct'; gemini-4-hydrogen 73-86 s, 13-30 nodes per object, two distinct towers, 0-2 problems
+#   (it reasons before answering, so it needs a large max_output_tokens). Richer geometry wins; the faster models stay
+#   as fallbacks, and every answer goes through the repair round.
+WORLD_MODELS = ("gemini-4-hydrogen", "gemini-3.6-flash", "gemini-3.5-flash-lite")
 COMMAND_MODELS = ("gemini-3.5-flash-lite", "gemini-3.6-flash")
+# The repair round only corrects listed problems in an answer it is handed, so it uses the fast models: with
+# hydrogen for both calls a world that needed a repair took ~200 s (2026-11-15); 3.6-flash answers in 22-36 s.
+REPAIR_MODELS = ("gemini-3.6-flash", "gemini-3.5-flash-lite")
+REPAIR_TIMEOUT_MS = 75_000
 TIMEOUT_MS = 25_000
-WORLD_TIMEOUT_MS = 120_000  # geometry-writing answers are long
+WORLD_TIMEOUT_MS = 150_000  # geometry-writing answers are long (gemini-4-hydrogen measured 67-92 s)
 
 GEOMETRY_LANGUAGE = """GEOMETRY LANGUAGE. `geometry_json` is a JSON string holding ONE node: {"op": ..., "params": {...},
 "children": [...], "material": "<material id>"}. Local space: meters, +Y up, origin = the object's base point on the
@@ -44,7 +52,8 @@ Primitives (no children). CENTRED on the origin: sphere {radius}; ellipsoid {rad
 Combine (2..8 children): union; intersect; subtract (exactly 2: first minus second); smooth_union {k} (organic blend,
   k 0.05-2); smooth_subtract {k} (2); smooth_intersect {k} (2).
 Domain (exactly 1 child): translate {offset:[x,y,z]}; rotate {quat:[x,y,z,w]} (90 deg about X = [0.7071,0,0,0.7071],
-  about Z = [0,0,0.7071,0.7071], about Y = [0,0.7071,0,0.7071], 45 deg about X = [0.3827,0,0,0.9239]); scale {factor};
+  about Z = [0,0,0.7071,0.7071], about Y = [0,0.7071,0,0.7071], 45 deg about X = [0.3827,0,0,0.9239]);
+  rotate_axis {axis:[x,y,z], angle} (degrees; the angle may be {"ref": param}, so interactions can turn parts); scale {factor};
   stretch {factor:[x,y,z]}; mirror {axis: 0|1|2}; repeat {period:[x,y,z], count:[x,y,z]} (count 0 = off);
   radial_repeat {count, offset} (copies of a child placed at +X around the Y axis: petals, ribs, spokes, pillars);
   spiral_repeat {count, pitch, copies} (copy j turned by j*360/count degrees about Y and raised by j*pitch/count, so
@@ -71,8 +80,11 @@ TECHNIQUES (compose them; vary proportions and details; they are methods, not fi
   around a core cylinder), optionally taper, translated up by half its height; or a core plus a spiral_repeat ridge.
 - Spiral staircase: spiral_repeat {count 12-20, pitch 3-6, copies 20-80} of a step box translated to +X, around a
   central column; railings as curve_tube or a second spiral_repeat of thin posts.
-- Floating island: a flattened, displaced top (cylinder or ellipsoid) smooth-unioned with an inverted rocky underside
-  (cone with a small radius_bottom and large radius_top, displaced), perhaps small hanging rocks; raise it.
+- Floating island: ONE connected rock mass, never separate pieces: a wide, flattened top (ellipsoid or cylinder,
+  gently displaced) smooth_union (k 2-5) with a downward-tapering underside (cone with radius_top close to the top's
+  radius and a small radius_bottom, displaced amplitude 0.5-1.5) that overlaps the top by a few meters; optional 2-4
+  hanging rock spikes smooth-unioned into the underside; raise the whole island. Its silhouette should read as a
+  floating chunk of land, wider than tall.
 - Arch: curve_tube from [-w,0,0] through [0,2h,0] to [w,0,0]; or the upper half of an upright torus (intersect it with a
   box above y = 0); crystalline arches add shards (polyhedron, superquadric exponent 0.6) along it.
 - Polyhedral sculptures: polyhedron, compounds (union with a rotated copy), hollow frames (shell, or subtract a
@@ -80,7 +92,10 @@ TECHNIQUES (compose them; vary proportions and details; they are methods, not fi
 - Branching / fractal forms: a branch as a definition; the next level = radial_repeat of rotated, scaled, translated uses
   of the previous one (2-3 levels within the budget); lattices with repeat inside intersect/subtract.
 Materials: every material id used in nodes must be listed in `materials`; glowing things get emissive_color and
-emissive_strength 1.5-6 (they emit light). Put the material on primitives or on a parent node.
+emissive_strength 1.5-6 (they emit light). Put the material on primitives or on a parent node. Give natural and built
+materials a texture_query: 2-4 words naming the real-world surface, used to find a free CC0 photo texture (e.g. 'pine
+bark', 'mossy granite rock', 'weathered wooden planks', 'rough sandstone'); base_color still sets the overall tone.
+Leave texture_query empty for glowing, glassy, crystal, metallic-smooth or abstract materials.
 PER-ENTITY VARIATION: declare 0-3 `parameters` (name, min, max) and use EACH of them as {"ref": name} in the geometry.
 size_m = radius of a sphere around the base point that contains the object."""
 
@@ -95,6 +110,11 @@ BEHAVIOUR = """BEHAVIOUR. Give objects distinctive, fitting interactions compose
     spores|dust|smoke|embers|glow, color, count 10-200}; give {resource, amount}; trigger_nearby {radius_m <= 30,
     max_targets <= 8, same_kind, interaction (id of a player_initiated=false interaction of this object that runs on
     the neighbours)}. The variable `emission` scales an object's glow and emitted light (0 = dark, 2 = twice as bright).
+An interaction whose verb promises movement or a new arrangement (align, rotate, turn, tilt, open, close, raise,
+lower, extend, spin into place) MUST change the geometry: give the moving parts parameters and change them with
+set_param / scale_param. Example 'Align rings': each ring sits inside rotate_axis {axis:[1,0,0], angle: {"ref":
+"tilt_a"}} (tilt_b, tilt_c for the others; ranges like 0-60, so they start tilted); 'align' set_params every tilt to 0,
+which brings all rings into one plane around the shared centre. At most 3 parameters per object.
 Make behaviour fit the object: something fragile can shatter (set_condition removed + emit), something luminous can
 flare and wake its neighbours (add_var emission + trigger_nearby), something growing can be harvested (requires +
 add_var + scale_param + give + emit). Use requires to stop actions repeating forever. flammable = true for plants and
@@ -103,7 +123,8 @@ wooden things."""
 WORLD_SYSTEM = f"""You design explorable 3D worlds for the G-reality engine. Return only JSON for the given schema.
 
 1. Terrain and climate: the numeric fields (relief, ruggedness, lake, colors, time_of_day_h, fog_density,
-   ambient_light: 0.03 very dark .. 0.25 daylight).
+   ambient_light: 0.03 very dark .. 0.25 daylight), plus ground_texture_query and cliff_texture_query (real-world
+   surfaces such as 'forest floor', 'grass ground', 'desert sand', 'snow', 'granite cliff', 'volcanic rock').
 2. requested_structures: list EVERY distinct structure or object kind the user names (e.g. 'floating ring',
    'spiral tower', 'floating island', 'crystal arch', 'polyhedron', 'fractal tree').
 3. OBJECTS: construct each requested structure as its own object (up to 8; merge only near-identical ones) as a
@@ -171,7 +192,7 @@ class GeminiInterpreter:
             response_mime_type="application/json",
             response_schema=schema,
             temperature=temperature,
-            max_output_tokens=16000,
+            max_output_tokens=48000,  # reasoning models count their thinking against this budget
             # per-request deadline: geometry-writing world answers are long, commands are short
             http_options=self._types.HttpOptions(timeout=timeout_ms) if timeout_ms else None,
         )
@@ -222,17 +243,22 @@ class GeminiInterpreter:
         fix = (f"Original request: {request[:1500]}\n\nYour previous answer: {first.model_dump_json()[:12000]}\n\n"
                f"Problems found when the engine validated and measured it:\n" + "\n".join(f"- {m}" for m in every[:40])
                + "\n\nReturn the complete corrected JSON. Keep what was right; fix every problem listed.")
+        first_model = self.last_model
         try:
-            repaired = self._generate(system, fix, schema, 0.3, models, WORLD_TIMEOUT_MS)
+            repaired = self._generate(system, fix, schema, 0.3, self._repair_models(), REPAIR_TIMEOUT_MS)
         except InterpreterError as exc:
             self.last_notes.append(f"repair round failed ({exc.code}); kept the first answer")
             return first
         hard_after, _ = draft_report(repaired.objects, repaired.requested_structures)
+        repair_model, self.last_model = self.last_model, first_model
         if len(hard_after) <= len(hard) and repaired.objects:
-            self.last_notes.append(f"repair round fixed {len(hard) - len(hard_after)} of {len(hard)} problems")
+            self.last_notes.append(f"repair round ({repair_model}) fixed {len(hard) - len(hard_after)} of {len(hard)} problems")
             return repaired
         self.last_notes.append(f"repair round did not improve ({len(hard_after)} problems); kept the first answer")
         return first
+
+    def _repair_models(self) -> list[str]:
+        return list(REPAIR_MODELS)
 
     def world(self, prompt: str) -> WorldDraft:
         models = self._models(WORLD_MODELS)

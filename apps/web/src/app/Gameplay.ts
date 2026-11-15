@@ -322,7 +322,7 @@ export class Gameplay {
       player_position: [p.position.x, p.position.y - 1.7, p.position.z],
       view_direction: [f.x, f.y, f.z],
       expected_world_revision: this.revision,
-    }, 300_000);
+    }, 480_000);
     if (result.status !== "committed") throw new Error(result.message || "Nothing was created.");
     this.revision = Math.max(this.revision, result.world_revision);
     return result.message;

@@ -51,6 +51,9 @@ class MaterialDraft(BaseModel):
     emissive_color: list[float] = Field(default=[0.0, 0.0, 0.0], description="three numbers 0-1; light the surface emits")
     emissive_strength: float = Field(default=0.0, description="0 = none, 1-8 = glowing")
     variation: float = Field(default=0.15, description="0-1 procedural tint noise")
+    texture_query: str = Field(default="", description="2-4 words naming a real-world surface to find a CC0 photo "
+                                                       "texture (e.g. 'mossy granite rock', 'pine bark'); empty for "
+                                                       "glowing, glassy or abstract materials")
 
 
 class ParamDraft(BaseModel):
@@ -145,6 +148,9 @@ class WorldDraft(BaseModel):
     lake_radius_m: float = Field(default=70.0, description="20-400")
     # A list, not a tuple: Gemini's response schema does not accept tuple (prefixItems) types.
     ground_color: list[float] = Field(default=[0.20, 0.32, 0.14], description="exactly three numbers: linear RGB, each 0-1")
+    ground_texture_query: str = Field(default="", description="real-world ground surface for a CC0 photo texture, "
+                                                              "e.g. 'forest floor', 'desert sand', 'grass ground'")
+    cliff_texture_query: str = Field(default="", description="real-world rock for steep slopes, e.g. 'granite cliff'")
     snow_peaks: bool = False
     time_of_day_h: float = Field(default=10.0, description="0-24")
     fog_density: float = Field(default=0.004, description="0 = clear, 0.02 = thick fog")
@@ -260,7 +266,9 @@ def object_geometry(obj: ObjectShapeDraft, index: int, id_prefix: str = "obj") -
         e = _color(m.emissive_color) if m.emissive_strength > 0 else (0.0, 0.0, 0.0)
         mats.append({"id": _slug(m.id), "base_color": _color(m.base_color), "roughness": _clamp(m.roughness, 0, 1),
                      "emissive": e, "emissive_strength": _clamp(m.emissive_strength, 0.0, 12.0),
-                     "variation": _clamp(m.variation, 0, 1), "variation_frequency": 1.5})
+                     "variation": _clamp(m.variation, 0, 1), "variation_frequency": 1.5,
+                     # resolved to a CC0 asset (or dropped) by textures.resolve_* before the world is stored
+                     "texture": {"query": m.texture_query.strip()[:80]} if m.texture_query.strip() else None})
     if not mats:
         mats = [{"id": "surface", "base_color": (0.5, 0.5, 0.5), "roughness": 0.8}]
     known = {m["id"] for m in mats}
@@ -324,6 +332,10 @@ _FILLER = {"giant", "enormous", "huge", "large", "small", "tiny", "big", "with",
 _FILLER_STEMS = {_stem(w) for w in _FILLER}
 
 
+_MOTION_WORDS = ("align", "rotate", "turn", "tilt", "open", "close", "raise", "lower", "lift", "extend", "retract",
+                 "spin", "unfold", "fold", "rearrange", "straighten")
+
+
 def _words(text: str) -> set:
     return {_stem(w) for w in "".join(c if c.isalnum() else " " for c in text).split() if len(w) > 2}
 
@@ -377,6 +389,12 @@ def draft_report(objects: list, requested: list) -> tuple[list[str], list[str]]:
             continue
         covered |= _words(f"{obj.name} {obj.kind}")
         h, soft, summary = object_report(obj, geom)
+        for it in obj.interactions[:3]:
+            said = f"{it.id} {it.verb}".lower()
+            moves = any(w in said for w in _MOTION_WORDS)
+            if moves and not any(e.type in ("set_param", "scale_param") for e in it.effects):
+                h.append(f"interaction '{it.verb[:30]}' promises movement but changes no geometry parameter: give the "
+                         f"moving parts parameters (e.g. rotate_axis angle {{\"ref\": name}}) and set_param them")
         every.append(f"{label}: {summary}")
         hard += [f"{label}: {m}" for m in h]
         every += [f"{label}: {m}" for m in h + soft]
@@ -456,9 +474,10 @@ def build_spec(draft: WorldDraft, prompt: str, seed: int) -> WorldSpec:
         basin = (0.0, 0.0)
         water_level = -relief * 0.15 - 2.0
 
-    def mat(id_: str, rgb, rough=0.9, variation=0.2) -> MaterialDefinition:
+    def mat(id_: str, rgb, rough=0.9, variation=0.2, query: str = "") -> MaterialDefinition:
         return MaterialDefinition(id=id_, base_color=_color(rgb), roughness=rough, variation=variation,
-                                  variation_frequency=0.35)
+                                  variation_frequency=0.35,
+                                  texture={"query": query.strip()[:80]} if query.strip() else None)
 
     terrain = TerrainDefinition(
         base_height=0.0,
@@ -471,8 +490,8 @@ def build_spec(draft: WorldDraft, prompt: str, seed: int) -> WorldSpec:
         basin_center=basin,
         basin_radius=lake_r * 1.6 if draft.has_lake else 0.0,
         basin_depth=(relief * 0.5 + 10.0) if draft.has_lake else 0.0,
-        ground_material=mat("ground", draft.ground_color),
-        slope_material=mat("cliff", (0.36, 0.34, 0.31)),
+        ground_material=mat("ground", draft.ground_color, query=draft.ground_texture_query),
+        slope_material=mat("cliff", (0.36, 0.34, 0.31), query=draft.cliff_texture_query),
         peak_material=mat("snow", (0.9, 0.92, 0.95), rough=0.6, variation=0.05) if draft.snow_peaks else None,
         peak_height=relief * 0.3 if draft.snow_peaks else 1e9,
         water_material=mat("water", (0.05, 0.16, 0.22), rough=0.05, variation=0.0) if draft.has_lake else None,

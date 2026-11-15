@@ -612,6 +612,7 @@ export function App() {
           <div>SDF instances {status.instances} · archetypes {status.archetypes} · materials {status.materials}</div>
           <div>grid {status.grid}{status.gridOverflow ? ` · OVERFLOW ${status.gridOverflow}` : ""}</div>
           <div>shader {Math.round(status.shaderChars / 1024)} KiB, compiled in {fmt(status.compileMs, 0)} ms{status.compileErrors.length ? " · SHADER ERRORS" : ""}</div>
+          <div>photo textures (CC0, Poly Haven): {status.textures}</div>
           <div>GPU↔CPU terrain max error: {status.terrainParityM === null ? "n/a" : `${(status.terrainParityM * 1000).toFixed(2)} mm`}</div>
           <div>regions loaded {status.regionsLoaded} · pending {status.regionsPending} · world rev {status.worldRevision ?? "–"} · region ({status.region.join(",")}) rev {status.regionRevision ?? "–"}</div>
           <div>camera {status.position.map((v) => v.toFixed(1)).join(", ")}{status.flying ? " · flying" : ""}</div>

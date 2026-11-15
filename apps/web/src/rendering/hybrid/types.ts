@@ -41,6 +41,8 @@ export interface NearFieldStats {
   gpuMs: number | null;
   shaderChars: number;
   compileMs: number;
+  /** CC0 photo texture sets loaded / bound in the open world */
+  textures: string;
 }
 
 export interface NearFieldRenderer {

@@ -29,11 +29,15 @@ export interface SceneMaterialSlots {
   water: number; // -1 when the world has no water
 }
 
+/** Materials beyond this index never get photo textures (uniform array size). */
+export const MAX_TEXTURED_MATERIALS = 48;
+
 export function buildMarchFragment(sceneGlsl: string, slots: SceneMaterialSlots): string {
   return /* glsl */ `
 precision highp float;
 precision highp int;
 precision highp sampler2D;
+precision mediump sampler2DArray;
 
 #define MAT_TERRAIN -1.0
 #define MAT_WATER -2.0
@@ -87,6 +91,14 @@ uniform int uRippleCount;
 uniform vec4 uFire[8];       // point lights (fires, glowing objects): world position, intensity
 uniform vec3 uFireColor[8];  // their colors
 uniform int uFireCount;
+// CC0 photo textures (see textures.ts): one layer per texture set; per material x = layer (-1 none), y = 1 / tile size
+// in meters, z = blend weight (0 until the maps have arrived), w = normal-map strength; tint rgb = the albedo's mean
+// colour (linear), a = how far the photo is recoloured to the material's base colour.
+uniform sampler2DArray uTexAlbedo;
+uniform sampler2DArray uTexNormal;
+uniform sampler2DArray uTexArm;
+uniform vec4 uMatTex[${MAX_TEXTURED_MATERIALS}];
+uniform vec4 uMatTint[${MAX_TEXTURED_MATERIALS}];
 
 ${NOISE_GLSL}
 ${SDF_GLSL}
@@ -409,11 +421,28 @@ float fogAmount(vec3 ro, vec3 rd, float t) {
   return 1.0 - exp(-a * integral);
 }
 
+// Henyey-Greenstein phase function, normalised so that isotropic scattering is 1.
+float hgPhase(float c, float g) {
+  float g2 = g * g;
+  return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * c, 1.5);
+}
+
+// Participating media in one analytic pass (no extra march): exponential height fog whose density varies in slow,
+// wind-drifting patches; light scattered into the view ray by that fog (forward-peaked towards the sun, so haze glows
+// around it and stays cool away from it); and a faint sky-tinted aerial perspective that makes distance read even in
+// clear worlds.
 vec3 applyFog(vec3 col, vec3 ro, vec3 rd, float t) {
-  float f = fogAmount(ro, rd, t);
-  float sun = max(dot(rd, uSunDir), 0.0);
-  vec3 fogCol = mix(uFogColor, uFogColor + uSunColor * 0.6, pow(sun, 6.0));
-  return mix(col, fogCol, f);
+  vec3 mid = ro + rd * min(t, 500.0) * 0.5;
+  vec3 drift = vec3(uCloud.y, 0.0, uCloud.z) * uTime * 0.03;
+  float patches = 0.55 + 0.9 * vnoise3(mid * 0.011 + drift, 13.0);
+  float f = 1.0 - pow(1.0 - fogAmount(ro, rd, t), patches);
+  float c = dot(rd, uSunDir);
+  float sunUp = smoothstep(-0.05, 0.12, uSunDir.y);
+  vec3 inscatter = uFogColor * (0.75 + 0.25 * uDaylight) + uSunColor * sunUp * (0.18 * hgPhase(c, 0.72) + 0.12);
+  float air = (1.0 - exp(-t * 0.00045)) * (0.35 + 0.65 * uDaylight);
+  vec3 airCol = mix(uFogColor, uSkyColor, clamp(rd.y * 2.5 + 0.35, 0.0, 1.0)) + uSunColor * sunUp * 0.05 * hgPhase(c, 0.6);
+  col = mix(col, airCol, air);
+  return mix(col, inscatter, f);
 }
 
 vec3 waterNormal(vec2 xz, float t) {
@@ -465,6 +494,61 @@ vec3 bump(vec3 n, vec3 p, float freq, float strength) {
                 vnoise3((p + vec3(0.0, e, 0.0)) * freq, 7.0) - c,
                 vnoise3((p + vec3(0.0, 0.0, e)) * freq, 7.0) - c) / e;
   return normalize(n - strength * (g - n * dot(g, n)) / freq);
+}
+
+// Triplanar PBR sampling of material mi's texture set at world point p with geometric normal n. Blends the photo into
+// albedo (recoloured towards the material's base colour by its tint), perturbs n with the OpenGL normal map (whiteout
+// blend), and returns roughness / ambient occlusion from the ARM map. Fades out with distance, where the procedural
+// surface already reads as the right material and the photo detail would only alias.
+struct TexSample { vec3 albedo; vec3 n; float rough; float ao; float w; float metal; };
+TexSample triplanarPBR(int mi, vec3 p, vec3 n, float t, vec3 base) {
+  TexSample o;
+  o.albedo = base; o.n = n; o.rough = 0.9; o.ao = 1.0; o.w = 0.0; o.metal = 0.0;
+  if (mi < 0 || mi >= ${MAX_TEXTURED_MATERIALS}) return o;
+  vec4 mt = uMatTex[mi];
+  float w = mt.z * (1.0 - smoothstep(110.0, 320.0, t));
+  if (mt.x < 0.0 || w <= 0.001) return o;
+  vec3 bw = pow(abs(n), vec3(4.0));
+  bw /= (bw.x + bw.y + bw.z);
+  vec3 q = p * mt.y;
+  float L = mt.x;
+  vec4 A = texture(uTexAlbedo, vec3(q.zy, L)) * bw.x + texture(uTexAlbedo, vec3(q.xz, L)) * bw.y
+         + texture(uTexAlbedo, vec3(q.xy, L)) * bw.z;
+  vec3 a = A.rgb;
+  float h = A.a;  // height (displacement) map, 1 = flat when the set has none
+  // a second, 7x larger projection of the same photo breaks up visible tiling over large surfaces
+  vec3 qm = q * 0.143;
+  vec3 am = texture(uTexAlbedo, vec3(qm.zy, L)).rgb * bw.x + texture(uTexAlbedo, vec3(qm.xz, L)).rgb * bw.y
+          + texture(uTexAlbedo, vec3(qm.xy, L)).rgb * bw.z;
+  float meanS = max(dot(pow(uMatTint[mi].rgb, vec3(1.0 / 2.2)), vec3(0.333)), 0.05);
+  a *= mix(1.0, clamp(dot(am, vec3(0.333)) / meanS, 0.4, 1.8), 0.5);
+  a = pow(a, vec3(2.2));  // stored as sRGB bytes
+  vec4 tint = uMatTint[mi];
+  // recolour towards the material's base colour, but never into near-black: very dark bases (obsidian, basalt)
+  // would otherwise crush the photo's detail to invisibility
+  float baseLum = dot(base, vec3(0.2126, 0.7152, 0.0722));
+  vec3 target = base * max(1.0, 0.07 / max(baseLum, 1e-4));
+  vec3 recoloured = target * a / max(tint.rgb, vec3(0.03));
+  vec3 photo = mix(a, recoloured, tint.a);
+  // height: crevices darker and rougher, ridges catch the light (cavity shading from the displacement map)
+  photo *= mix(0.5, 1.12, h);
+  o.albedo = mix(base, photo, w);
+  vec3 arm = texture(uTexArm, vec3(q.zy, L)).rgb * bw.x + texture(uTexArm, vec3(q.xz, L)).rgb * bw.y
+           + texture(uTexArm, vec3(q.xy, L)).rgb * bw.z;
+  o.ao = mix(1.0, arm.r * mix(0.55, 1.0, h), w);
+  o.rough = clamp(arm.g + (0.5 - h) * 0.25, 0.04, 1.0);
+  o.metal = arm.b * w;
+  vec3 tx = texture(uTexNormal, vec3(q.zy, L)).xyz * 2.0 - 1.0;
+  vec3 ty = texture(uTexNormal, vec3(q.xz, L)).xyz * 2.0 - 1.0;
+  vec3 tz = texture(uTexNormal, vec3(q.xy, L)).xyz * 2.0 - 1.0;
+  tx = vec3(tx.xy + n.zy, abs(tx.z) * n.x);
+  ty = vec3(ty.xy + n.xz, abs(ty.z) * n.y);
+  tz = vec3(tz.xy + n.xy, abs(tz.z) * n.z);
+  vec3 nn = normalize(tx.zyx * bw.x + ty.xzy * bw.y + tz.xyz * bw.z);
+  // normal-map detail, slightly exaggerated (1.35x) so it reads under low sun and in large views
+  o.n = normalize(n + (nn - n) * clamp(w * mt.w * 1.35, 0.0, 1.6));
+  o.w = w;
+  return o;
 }
 
 // same tone curve as COMPOSITE_FRAG
@@ -523,6 +607,8 @@ void main() {
     matId = hit.mat;
     vec3 albedo;
     float rough = 0.9;
+    float texAo = 1.0;  // ambient occlusion from a photo texture's ARM map
+    float texMetal = 0.0;  // metalness from the ARM map (metal textures get coloured, sharper reflections)
     vec3 glow = vec3(0.0);
     float emissive = 0.0;
     if (hit.mat == MAT_WATER) {
@@ -568,6 +654,18 @@ void main() {
         albedo = mix(albedo, albedo * vec3(1.22, 1.08, 0.7), smoothstep(0.5, 0.85, macro) * 0.55 * (1.0 - cliff));
         albedo = mix(albedo, albedo * vec3(0.78, 0.92, 0.82), smoothstep(0.5, 0.15, macro) * 0.4 * (1.0 - cliff));
         rough = mix(0.95, 0.75, cliff);
+        {
+          vec3 n0 = n;
+          TexSample tg = triplanarPBR(GROUND_MAT, p, n0, t, albedo);
+          TexSample tc = triplanarPBR(CLIFF_MAT, p, n0, t, albedo);
+          float k = cliff;
+          if (tg.w > 0.0 || tc.w > 0.0) {
+            albedo = mix(tg.albedo, tc.albedo, k);
+            n = normalize(mix(tg.n, tc.n, k));
+            rough = mix(mix(rough, tg.rough, tg.w), mix(rough, tc.rough, tc.w), k);
+            texAo = mix(tg.ao, tc.ao, k);
+          }
+        }
         if (PEAK_MAT >= 0) {
           float snow = smoothstep(uPeakHeight - 6.0, uPeakHeight + 10.0, p.y + 8.0 * (v - 0.5)) * (1.0 - smoothstep(0.35, 0.6, slope));
           albedo = mix(albedo, materialColor(PEAK_MAT).rgb, snow);
@@ -583,8 +681,23 @@ void main() {
         albedo = m.rgb;
         rough = m.a;
         glow = materialEmissive(mi);
-        n = bump(n, p, max(mx.y, 0.5) * 2.0, mx.x * 1.0 * (1.0 - smoothstep(10.0, 60.0, t)));
-        albedo *= 1.0 + mx.x * (2.0 * vnoise3(p * mx.y, 3.0) - 1.0);
+        TexSample ts = triplanarPBR(mi, p, n, t, albedo);
+        if (ts.w > 0.0) {
+          albedo = ts.albedo;
+          n = ts.n;
+          rough = mix(rough, ts.rough, ts.w);
+          texAo = ts.ao;
+          texMetal = ts.metal;
+        } else {
+          // no photo texture (glowing, glassy, metallic or unmatched materials): two-scale procedural detail with a
+          // minimum strength, so a low 'variation' from the model never leaves a surface one flat colour
+          float var = max(mx.x, 0.22);
+          float fq = max(mx.y, 0.6);
+          float near = 1.0 - smoothstep(12.0, 90.0, t);
+          n = bump(n, p, fq * 2.0, var * 1.3 * near);
+          float d = (vnoise3(p * fq, 3.0) * 0.6 + vnoise3(p * fq * 4.7 + 7.1, 5.0) * 0.4) * 2.0 - 1.0;
+          albedo *= max(0.2, 1.0 + var * 1.25 * d);
+        }
         if (hit.inst >= 0) {
           vec4 fx = texelFetch(uInst, ivec2(4, hit.inst), 0);
           // burn visual is derived from authoritative entity state (condition / burn parameter)
@@ -599,15 +712,21 @@ void main() {
       }
       float ndl = max(dot(n, uSunDir), 0.0);
       float sh = ndl > 0.0 ? shQ : 0.0;
-      float ao = aoQ;
+      float ao = aoQ * texAo;
       // sky fill from above, warm bounce light from the sunlit ground below (n.y < 0 faces down)
       vec3 bounce = materialColor(GROUND_MAT).rgb * uSunColor * max(uSunDir.y, 0.0) * 0.35;
       vec3 skyFill = mix(uFogColor, uSkyColor, 0.5 + 0.5 * n.y) * (0.9 + 1.6 * uAmbient);
       vec3 hemi = (skyFill * (0.6 + 0.4 * n.y) + bounce * (0.5 - 0.5 * n.y)) * ao;
       float roughFar = mix(max(rough, 0.08), 1.0, smoothstep(30.0, 180.0, t));
-      vec3 spec = specularGGX(n, -rd, uSunDir, roughFar, vec3(0.04)) * (1.0 - smoothstep(60.0, 220.0, t));
-      col = albedo * (uSunColor * ndl * sh * 1.6 + hemi) + uSunColor * spec * sh * 3.0;
-      col += vec3(1.0, 0.42, 0.08) * emissive + glow * 0.7 * (0.8 + 0.2 * vnoise3(p * 3.0 + vec3(uTime * 0.4), 9.0));
+      vec3 f0 = mix(vec3(0.04), albedo, texMetal);
+      vec3 spec = specularGGX(n, -rd, uSunDir, roughFar, f0) * (1.0 - smoothstep(60.0, 220.0, t));
+      col = albedo * (1.0 - 0.85 * texMetal) * (uSunColor * ndl * sh * 1.6 + hemi) + uSunColor * spec * sh * 3.0;
+      // glowing materials: slowly flowing energy veins (strong contrast) and a fresnel rim that brightens edges at
+      // grazing angles, so emissive surfaces read as structured, translucent light instead of a flat colour
+      float flow = vnoise3(p * 1.6 + vec3(0.0, uTime * 0.45, 0.0), 9.0) * 0.6 + vnoise3(p * 5.1 - vec3(uTime * 0.3), 4.0) * 0.4;
+      float veins = smoothstep(0.42, 0.78, flow);
+      float rim = pow(1.0 - max(dot(n, -rd), 0.0), 2.0);
+      col += vec3(1.0, 0.42, 0.08) * emissive + glow * 0.7 * (0.45 + 0.9 * veins) * (0.7 + 1.1 * rim);
       // light from fires (derived from burning entities): warm, flickering, unshadowed point lights
       for (int i = ZERO; i < 8; i++) {
         if (i >= uFireCount) break;

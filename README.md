@@ -22,6 +22,7 @@ Built at SanD Hacks 2026.
 | World-specific interactions (E), fire simulation | — | yes |
 | Create new objects in the current world (T) | — | yes, with a Gemini key |
 | Persistent revisions, reopen saved worlds | — | yes (your database) |
+| CC0 photo textures (Poly Haven), fetched on first use and cached in your database | — | yes, with a Gemini key |
 | Gaussian far field (experimental) | — | developer tools only; needs WSL2 + CUDA |
 
 No credentials ship with either. The website loads only static files and never contacts a world server; the companion binds to `127.0.0.1` and
@@ -42,6 +43,19 @@ requires a per-launch pairing token.
 - **In-world creation.** Press **T**, describe something, and Gemini designs new geometry that the server validates,
   places in front of the player and saves as a new world revision; existing objects are untouched and the creation is
   still there after a reload or a companion restart.
+- **CC0 PBR materials.** Gemini names a real-world surface per material ("mossy granite rock"); the companion matches
+  it against the live Poly Haven catalogue (CC0 only), stores the asset id and parameters in the world, and caches the
+  colour, normal, AO/roughness/metal and height maps in Neon on first use. The renderer applies them with triplanar
+  projection (normal mapping, roughness, metalness, height-based cavity shading) and keeps procedural surfaces until
+  they arrive, so rendering never waits on the network. Glowing and abstract materials stay procedural (two-scale
+  noise, flowing emission veins, fresnel rim).
+- **Atmosphere.** Height fog with drifting density, sun-directional in-scattering and aerial perspective; bloom and
+  light shafts in post-processing.
+- **Landmarks across the world (generator v7).** Count-placed objects are laid out jointly with measured footprints
+  (no overlaps, spawn kept clear, terrain clearance) and recur on 480 m tiles, so exploration keeps finding them.
+  Existing worlds keep the generator version they were made with.
+- **Interactions that move geometry.** `rotate_axis` lets an interaction turn parts (e.g. "Align rings" brings tilted
+  rings into one plane); a check rejects interactions whose verb promises movement but change nothing.
 - **Gameplay.** Grounded player with gravity, jump, sprint, collision against the SDF geometry, wading and swimming.
 
 ### Experimental, not part of the default experience
@@ -49,7 +63,8 @@ requires a per-launch pairing token.
 - **Gaussian reconstruction** (`services/gpu`, `scripts/chunk3_reconstruct.py`): renders views of a region and fits
   3D Gaussians under WSL2/CUDA. It runs only when started by hand.
 - **Neural / Gaussian far field:** reconstructed assets can be displayed in developer tools (`` ` `` → Gaussian
-  diagnostic modes), but they are not integrated into normal rendering. The player view is the SDF renderer.
+  diagnostic modes), but they are not integrated into normal rendering (no background job runner, no hybrid
+  compositor). The player view is the SDF renderer; diagnostics say "SDF only".
 
 Known limitations are listed in [docs/testing/KNOWN_ISSUES.md](docs/testing/KNOWN_ISSUES.md).
 

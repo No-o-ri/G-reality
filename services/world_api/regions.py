@@ -29,7 +29,20 @@ from .terrain import stable_unit, terrain_height, terrain_slope
 #      spot is too steep or under water (Chunk 2 QA).
 #   4: archetypes are generated per world (procgen.py) instead of taken from the fixed library, and trees get a
 #      per-entity tilt (lean) in addition to yaw, scale and crown fullness (Chunk 4).
-GENERATOR_VERSION = 4
+# v5: count-placed features without a fixed centre (landmarks and settlements placed 'everywhere', 'lowlands' or
+# 'highlands') recur on a grid of ROAMING_TILE_M tiles instead of all standing in one 40 m circle at the origin, so a
+# world keeps revealing its landmarks however far the player walks. Worlds keep the version they were created with.
+# v6: count-placed objects are laid out jointly with measured footprints: nothing overlaps (they spiral outward until
+# they fit), nothing stands on the spawn point, grounded objects sit on the lowest ground under them (and spots that
+# would bury them are rejected), floating objects clear the highest ground under them; roaming tiles stay inside
+# their tile.
+# v7: landmarks anchored at the spawn (placement 'near_spawn') also recur: the spawn cluster stays, and every other
+# 480 m tile gets its own collision-free layout of the same stored geometry (at most MAX_TILE_OBJECTS per tile), so a
+# world whose objects were all placed near the spawn does not turn empty a few hundred metres away. Shore-anchored
+# features stay where they are.
+GENERATOR_VERSION = 7
+ROAMING_TILE_M = 480.0
+MAX_TILE_OBJECTS = 24
 MIN_RENDERABLE_GENERATOR_VERSION = 2
 MAX_ENTITIES_PER_REGION = 400
 
@@ -150,13 +163,205 @@ def _discrete_spot(spec: WorldSpec, seed: int, f: FeatureSpec, i: int, version: 
 _DISCRETE_CACHE: dict[tuple, list[tuple[FeatureSpec, int, float, float, float]]] = {}
 
 
+# ---------------------------------------------------------------------------------------------- v6 layout
+
+_SHAPE_CACHE: dict = {}
+_SPAWN_CLEAR_M = 12.0
+_GAP_M = 3.0
+
+
+def _shape(spec: WorldSpec, geometry_id: str) -> tuple:
+    """(horizontal footprint radius, lowest y, highest y) of an archetype in its local space, from its geometry."""
+    from .geometry_bounds import bounds
+
+    a = _archetypes(spec).get(geometry_id) or library().get(geometry_id)
+    key = (geometry_id, a.model_dump_json() if a else "")
+    hit = _SHAPE_CACHE.get(key)
+    if hit is None:
+        box = None
+        if a is not None:
+            box = bounds(a.root.model_dump(mode="json"), {k: v.model_dump() for k, v in (a.parameters or {}).items()})
+        if box is None:
+            r = a.bound_radius if a else 5.0
+            hit = (r * _DISCRETE_FOOTPRINT, 0.0, r)
+        else:
+            (x0, y0, z0), (x1, y1, z1) = box
+            hit = (max(abs(x0), abs(x1), abs(z0), abs(z1)), y0, y1)
+        if len(_SHAPE_CACHE) > 512:
+            _SHAPE_CACHE.clear()
+        _SHAPE_CACHE[key] = hit
+    return hit
+
+
+def _site(spec: WorldSpec, seed: int, f: FeatureSpec, x: float, z: float, foot: float, y0: float, y1: float):
+    """Base height for an object at (x, z), or None if the spot is unusable: the centre must pass the feature's
+    height / slope rules; a grounded object sits on the lowest terrain under its footprint and is rejected where the
+    ground would bury a large part of it; a floating object's base clears the highest terrain under it."""
+    free = f.model_copy(update={"center": None, "radius": 0.0})
+    if _accept(spec, seed, free, x, z) is None:
+        return None
+    r = foot * 0.6
+    heights = [terrain_height(spec.terrain, seed, x + dx, z + dz)
+               for dx, dz in ((0.0, 0.0), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r))]
+    lo, hi = min(heights), max(heights)
+    scale = f.scale_range[1]
+    if y0 * scale > 1.0:  # floats: its lowest part must stay above the ground under it
+        return hi
+    if hi - lo > 0.25 * (y1 - y0) * scale + 1.5:
+        return None
+    return lo
+
+
+def _layout(spec: WorldSpec, seed: int, items: list, spin_key: str, box=None) -> list:
+    """Joint, deterministic placement of discrete objects. items = (feature, tag, centre, spread); they are placed
+    largest first, each on a golden-angle spiral around its centre, at the first spot that keeps its footprint clear of
+    every object already placed (and of the spawn point) and passes the terrain checks. `spread` widens the spiral (to
+    distribute landmarks over a tile); `box` (x0, z0, x1, z1) keeps objects inside a roaming tile."""
+    sx, _, sz = spec.spawn
+    placed: list = []
+    out = []
+    sized = []
+    for f, tag, centre, spread in items:
+        foot, y0, y1 = _shape(spec, f.geometry_id)
+        sized.append((foot * f.scale_range[1], f, tag, centre, spread, y0, y1))
+    sized.sort(key=lambda it: (-it[0], it[1].id, it[2]))
+    for size, f, tag, (cx, cz), spread, y0, y1 in sized:
+        step = max(4.0, size * 1.3, spread)
+        spin = 2.0 * math.pi * stable_unit(seed, spin_key, f.id, tag, "spin")
+        for k in range(700):
+            r = step * math.sqrt(k) * 0.9
+            a = k * 2.399963 + spin
+            x, z = cx + r * math.cos(a), cz + r * math.sin(a)
+            if box is not None and not (box[0] + size <= x <= box[2] - size and box[1] + size <= z <= box[3] - size):
+                if r > 2.0 * ROAMING_TILE_M:
+                    break
+                continue
+            if math.hypot(x - sx, z - sz) < size + _SPAWN_CLEAR_M:
+                continue
+            if any(math.hypot(x - px, z - pz) < size + ps + _GAP_M for px, pz, ps in placed):
+                continue
+            h = _site(spec, seed, f, x, z, size, y0, y1)
+            if h is None:
+                continue
+            placed.append((x, z, size))
+            out.append((f, tag, x, h, z))
+            break
+    return out
+
+
+def _discrete_v6(spec: WorldSpec, seed: int, version: int) -> list:
+    key = ("v6", seed, version, hash(spec.model_dump_json()))
+    hit = _DISCRETE_CACHE.get(key)
+    if hit is None:
+        items = [(f, f"n{i}", f.center or (0.0, 0.0), 0.0)
+                 for f in spec.features if f.count > 0 and not _roaming(f, version, spec) for i in range(f.count)]
+        hit = _layout(spec, seed, items, "discrete")
+        if len(_DISCRETE_CACHE) > 64:
+            _DISCRETE_CACHE.clear()
+        _DISCRETE_CACHE[key] = hit
+    return hit
+
+
+def _tile_v6(spec: WorldSpec, seed: int, tx: int, tz: int, version: int) -> list:
+    """All roaming features of one tile, laid out jointly and kept inside the tile. Landmarks spread over it,
+    settlements stay a compact cluster; the home tile is centred on the origin."""
+    t = ROAMING_TILE_M
+    home = tx == 0 and tz == 0
+    jitter = 0.0 if home else 0.15 * t
+    cx = tx * t + jitter * (2.0 * stable_unit(seed, "tile-x", tx, tz) - 1.0)
+    cz = tz * t + jitter * (2.0 * stable_unit(seed, "tile-z", tx, tz) - 1.0)
+    if home and version >= 7:  # the home cluster stays around the spawn point
+        cx, cz = spec.spawn[0], spec.spawn[2]
+    roam = [f for f in spec.features if _roaming(f, version, spec)]
+    total = sum(f.count for f in roam)
+    # away from the spawn, bound the number of large objects per tile (rendering budget), keeping every kind present
+    cap = 1.0 if home or version < 7 or total <= MAX_TILE_OBJECTS else MAX_TILE_OBJECTS / total
+    counts = {f.id: max(1, round(f.count * cap)) for f in roam}
+    n = sum(c for f in roam for c in [counts[f.id]] if f.kind != "settlement") or 1
+    spread = (0.4 if version >= 7 else 0.35) * t / math.sqrt(n)
+    items = [(f, f"t{tx}_{tz}_{i}", (cx, cz), 0.0 if f.kind == "settlement" else spread)
+             for f in roam for i in range(counts[f.id])]
+    return _layout(spec, seed, items, f"tile{tx}_{tz}",
+                   (tx * t - 0.5 * t, tz * t - 0.5 * t, tx * t + 0.5 * t, tz * t + 0.5 * t))
+
+
+def _roaming(f: FeatureSpec, version: int, spec: WorldSpec | None = None) -> bool:
+    if version < 5 or f.count <= 0:
+        return False
+    if f.center is None:
+        return True
+    # v7: features placed around the spawn point recur too (their home-tile cluster stays at the spawn)
+    return version >= 7 and spec is not None and math.hypot(f.center[0] - spec.spawn[0], f.center[1] - spec.spawn[2]) < 1.0
+
+
+def _tile_spots(spec: WorldSpec, seed: int, f: FeatureSpec, tx: int, tz: int, version: int
+                ) -> list[tuple[str, float, float, float]]:
+    """Placements (tag, x, height, z) of a roaming feature in one tile. The home tile (0, 0) is centred on the origin
+    and seeded like the single v4 cluster; other tiles get a jittered centre and their own seed. Settlements stay a
+    40 m cluster (a village per tile), landmarks spread over most of the tile."""
+    home = tx == 0 and tz == 0
+    jitter = 0.0 if home else 0.25 * ROAMING_TILE_M
+    cx = tx * ROAMING_TILE_M + jitter * (2.0 * stable_unit(seed, f.id, "tile-x", tx, tz) - 1.0)
+    cz = tz * ROAMING_TILE_M + jitter * (2.0 * stable_unit(seed, f.id, "tile-z", tx, tz) - 1.0)
+    radius = 40.0 if f.kind == "settlement" else 0.42 * ROAMING_TILE_M
+    local = f.model_copy(update={"center": (cx, cz), "radius": radius,
+                                 "id": f.id if home else f"{f.id}.t{tx}_{tz}"})
+    out = []
+    for i in range(f.count):
+        spot = _discrete_spot(spec, seed, local, i, version)
+        if spot is not None:
+            out.append((f"t{tx}_{tz}_{i}", *spot))
+    return out
+
+
+def roaming_placements(spec: WorldSpec, seed: int, version: int, x0: float, z0: float, x1: float, z1: float
+                       ) -> list[tuple[FeatureSpec, str, float, float, float]]:
+    """Placements of roaming features from every tile that can reach the box (x0, z0)-(x1, z1). Deterministic."""
+    out = []
+    t = ROAMING_TILE_M
+    if version >= 6:
+        if not any(_roaming(f, version, spec) for f in spec.features):
+            return out
+        for tx in range(math.floor((x0 + 0.5 * t) / t) - 1, math.floor((x1 + 0.5 * t) / t) + 1):
+            for tz in range(math.floor((z0 + 0.5 * t) / t) - 1, math.floor((z1 + 0.5 * t) / t) + 1):
+                key = ("v6", seed, version, hash(spec.model_dump_json()), tx, tz)
+                spots = _TILE_CACHE.get(key)
+                if spots is None:
+                    spots = _tile_v6(spec, seed, tx, tz, version)
+                    if len(_TILE_CACHE) > 4096:
+                        _TILE_CACHE.clear()
+                    _TILE_CACHE[key] = spots
+                out += spots
+        return out
+    for f in spec.features:
+        if not _roaming(f, version):
+            continue
+        for tx in range(math.floor((x0 - t) / t), math.floor((x1 + t) / t) + 1):
+            for tz in range(math.floor((z0 - t) / t), math.floor((z1 + t) / t) + 1):
+                key = (seed, version, hash(spec.model_dump_json()), f.id, tx, tz)
+                spots = _TILE_CACHE.get(key)
+                if spots is None:
+                    spots = _tile_spots(spec, seed, f, tx, tz, version)
+                    if len(_TILE_CACHE) > 4096:
+                        _TILE_CACHE.clear()
+                    _TILE_CACHE[key] = spots
+                out += [(f, tag, x, h, z) for tag, x, h, z in spots]
+    return out
+
+
+_TILE_CACHE: dict[tuple, list[tuple[str, float, float, float]]] = {}
+
+
 def discrete_placements(spec: WorldSpec, seed: int, version: int) -> list[tuple[FeatureSpec, int, float, float, float]]:
-    """All discrete placements of a world as (feature, index, x, height, z). Deterministic; cached per world."""
+    """All discrete placements of a world as (feature, index, x, height, z). Deterministic; cached per world.
+    From v5, roaming features are excluded here (see roaming_placements)."""
     key = (seed, version, hash(spec.model_dump_json()))
     cached = _DISCRETE_CACHE.get(key)
     if cached is None:
         cached = []
         for f in spec.features:
+            if _roaming(f, version, spec):
+                continue
             for i in range(f.count):
                 spot = _discrete_spot(spec, seed, f, i, version)
                 if spot is not None:
@@ -176,16 +381,24 @@ def generate_region(world_id: str, spec: WorldSpec, seed: int, coord: RegionCoor
                     generator_version: int = GENERATOR_VERSION) -> list[WorldEntity]:
     x0, z0, x1, z1 = region_bounds(coord)
     out: list[WorldEntity] = []
-    placed = discrete_placements(spec, seed, generator_version)
-    for f, i, x, h, z in placed:
+    if generator_version >= 6:
+        placed = list(_discrete_v6(spec, seed, generator_version))
+    else:
+        placed = [(f, f"n{i}", x, h, z) for f, i, x, h, z in discrete_placements(spec, seed, generator_version)]
+    placed += roaming_placements(spec, seed, generator_version, x0 - 40.0, z0 - 40.0, x1 + 40.0, z1 + 40.0)
+    for f, tag, x, h, z in placed:
         if x0 <= x < x1 and z0 <= z < z1:
-            out.append(_entity(world_id, seed, f, f"n{i}", x, h, z, spec, generator_version))
+            out.append(_entity(world_id, seed, f, tag, x, h, z, spec, generator_version))
     # From version 3, scattered objects keep clear of discrete ones (no trees growing through houses).
-    keep_clear = [
-        (x, z, _bound(f.geometry_id, spec) * _DISCRETE_FOOTPRINT * f.scale_range[1])
-        for f, _, x, _, z in placed
-        if x0 - 40.0 <= x < x1 + 40.0 and z0 - 40.0 <= z < z1 + 40.0
-    ] if generator_version >= 3 else []
+    if generator_version >= 6:  # measured footprints, and a window wide enough for large landmarks
+        keep_clear = [(x, z, _shape(spec, f.geometry_id)[0] * f.scale_range[1]) for f, _, x, _, z in placed
+                      if x0 - 160.0 <= x < x1 + 160.0 and z0 - 160.0 <= z < z1 + 160.0]
+    else:
+        keep_clear = [
+            (x, z, _bound(f.geometry_id, spec) * _DISCRETE_FOOTPRINT * f.scale_range[1])
+            for f, _, x, _, z in placed
+            if x0 - 40.0 <= x < x1 + 40.0 and z0 - 40.0 <= z < z1 + 40.0
+        ] if generator_version >= 3 else []
     for f in spec.features:
         if f.count > 0 or f.density_per_ha <= 0.0:
             continue

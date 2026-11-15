@@ -216,6 +216,16 @@ vec3 opSpiral(vec3 p, float count, float pitch, float copies) {
   float s = sin(j * sector);
   return vec3(c * p.x + s * p.z, p.y - j * rise, -s * p.x + c * p.z);
 }
+// Rotation of the child by deg degrees about axis (Rodrigues); the domain point is rotated by -deg.
+vec3 opRotAxis(vec3 p, vec3 axis, float deg) {
+  float l = length(axis);
+  if (l < 1e-6) return p;
+  vec3 k = axis / l;
+  float a = -radians(deg);
+  float c = cos(a);
+  float s = sin(a);
+  return p * c + cross(k, p) * s + k * dot(k, p) * (1.0 - c);
+}
 vec3 opTaper(vec3 p, float rate) {
   p.xz /= max(0.05, 1.0 + rate * p.y);
   return p;

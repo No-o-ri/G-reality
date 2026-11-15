@@ -32,6 +32,7 @@ export interface EngineStatus {
   gridOverflow: number;
   shaderChars: number;
   compileMs: number;
+  textures: string;
   compileErrors: string[];
   regionsLoaded: number;
   regionsPending: number;
@@ -261,6 +262,7 @@ export class Engine implements HybridFrame {
     this.gaussians.clear();
     this.assetsLoading.clear();
     this.onProgress?.("Compiling the world's geometry for the GPU…");
+    this.near.setTextureSource(companion ? (asset, map) => companion.fetchTexture(asset, map) : null);
     await this.near.setWorld(world);
     this.grass.setWorld(grassFor(world, (x, z) => this.near.groundHeight(x, z)));
     const parity = this.near.terrainParity();
@@ -661,6 +663,7 @@ export class Engine implements HybridFrame {
       gridOverflow: s.gridOverflow,
       shaderChars: s.shaderChars,
       compileMs: s.compileMs,
+      textures: s.textures,
       compileErrors: this.near.compileErrors,
       regionsLoaded: this.regions.size,
       regionsPending: this.pending.size,
@@ -675,7 +678,7 @@ export class Engine implements HybridFrame {
       debugView: this.debugView,
       gpuRenderer: this.gpuRenderer,
       terrainParityM: this.terrainParity,
-      farField: this.far ? "active" : "hybrid not implemented (Chunk 4)",
+      farField: this.far ? "active" : "SDF only (Gaussian far field: experimental, not in gameplay)",
       gaussianMode: this.gaussianMode,
       gaussianAssets: this.gaussians.assets(),
       gaussianSplats: this.gaussians.stats().splats,

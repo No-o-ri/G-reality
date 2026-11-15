@@ -51,7 +51,7 @@ from greality_contracts import (
     WorldSync,
 )
 
-from . import geometry_bounds, interactions, simulation
+from . import geometry_bounds, interactions, simulation, textures
 from .actions import ACTIONS, ActionContext, Effect, distance, evaluate
 from .interpreter import CommandContext, IntentDraft, Interpreter, InterpreterError, RulesInterpreter
 from .regions import GENERATOR_VERSION, generate_region, region_of, regions_touching, sphere_aabb
@@ -148,7 +148,9 @@ class WorldService:
         draft = interpreter.world(prompt)
         seed = seed if seed is not None else uuid.uuid4().int % (2**31)
         spec = build_spec(draft, prompt, seed)
-        spec.interpretation_notes.insert(0, f"interpreted by {interpreter.name}")
+        spec = textures.resolve_spec(spec, spec.interpretation_notes)  # bind CC0 photo textures once, for good
+        spec.interpretation_notes[0:0] = [f"interpreted by {interpreter.name}",
+                                          *list(getattr(interpreter, "last_notes", []) or [])]  # model, repair
         world_id = world_id or f"w-{uuid.uuid4().hex[:12]}"
         player = PlayerState(player_id=PLAYER_ID, position=spec.spawn)
         gameplay = GameplayState()
@@ -176,6 +178,7 @@ class WorldService:
                 (world_id, event_id, EventType.world_created.value,
                  Jsonb({"prompt": prompt[:2000], "seed": seed, "interpreter": interpreter.name}), now),
             )
+        textures.warm(self.pool, textures.asset_ids(spec))  # first use: cache the maps in Neon in the background
         return self.get_world(world_id)
 
     def get_world(self, world_id: str) -> WorldState:
@@ -410,7 +413,13 @@ class WorldService:
                 f"That would exceed this world's creation budget ({used_nodes + new_nodes} of {MAX_CREATED_NODES} "
                 f"geometry nodes). Try something simpler."))
         entities = _lay_out(cmd, draft, built, spec, w["seed"], nearby, token)
-        return self._commit_creation(cmd, draft, built, entities, intent, notes, problems)
+        geoms = textures.resolve_archetypes([g for _, g, _ in built], notes)
+        built = [(o, g, b) for (o, _, b), g in zip(built, geoms)]
+        result = self._commit_creation(cmd, draft, built, entities, intent, notes, problems)
+        if result.status == "committed":
+            textures.warm(self.pool, sorted({m.texture.asset_id for g in geoms for m in g.materials
+                                             if m.texture and m.texture.asset_id}))
+        return result
 
     def _reject_creation(self, cmd: WorldCommand, intent: ParsedIntent, code: str, message: str) -> MutationResult:
         result = MutationResult(status="rejected", command_id=cmd.command_id, world_revision=self._world_revision(cmd.world_id),
@@ -956,8 +965,11 @@ class WorldService:
 
 
 def make_pool(database_url: str, max_size: int = 6) -> ConnectionPool:
+    # Neon closes idle connections (scale to zero, pooler timeouts): a request that waited on Gemini for a minute
+    # must not get a dead one, so every checkout is verified first (and replaced if closed).
     pool = ConnectionPool(database_url, min_size=1, max_size=max_size, open=False,
-                          kwargs={"prepare_threshold": None})  # no server-side prepares through the Neon pooler
+                          kwargs={"prepare_threshold": None},  # no server-side prepares through the Neon pooler
+                          check=ConnectionPool.check_connection, max_idle=120.0)
     pool.open(wait=True, timeout=30)
     return pool
 

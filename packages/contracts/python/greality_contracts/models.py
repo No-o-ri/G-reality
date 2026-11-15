@@ -66,6 +66,22 @@ class Transform(Contract):
 # --------------------------------------------------------------------------- geometry
 
 
+class TextureBinding(Contract):
+    """A CC0 photo texture set bound to a material when the world (or creation) is made, so the world always shows
+    the same surface. `query` is what the language model asked for; the asset fields are filled when a match was
+    found online (otherwise the material keeps its procedural surface). Image bytes are cached in Neon on first use."""
+
+    query: str = Field(min_length=1, max_length=80)
+    asset_id: Optional[str] = Field(default=None, max_length=80, pattern=r"^polyhaven:[a-z0-9_]{1,64}$")
+    name: str = Field(default="", max_length=80)
+    license: Literal["CC0-1.0"] = "CC0-1.0"
+    page_url: str = Field(default="", max_length=200)
+    authors: list[str] = Field(default_factory=list, max_length=6)
+    scale_m: float = Field(default=2.0, ge=0.2, le=40.0, description="real-world size of one texture tile")
+    tint: float = Field(default=0.35, ge=0.0, le=1.0, description="0 = photo colours, 1 = recoloured to base_color")
+    normal_strength: float = Field(default=1.0, ge=0.0, le=2.0)
+
+
 class MaterialDefinition(Contract):
     id: str = Id
     base_color: Vec3 = Field(description="linear RGB, each 0..1")
@@ -74,6 +90,7 @@ class MaterialDefinition(Contract):
     emissive_strength: float = Field(default=0.0, ge=0.0, le=50.0)
     variation: float = Field(default=0.0, ge=0.0, le=1.0, description="procedural tint noise amplitude")
     variation_frequency: float = Field(default=1.0, ge=0.001, le=50.0)
+    texture: Optional[TextureBinding] = None
 
 
 class ParamSpec(Contract):
@@ -660,7 +677,7 @@ class ApiError(Contract):
 
 
 EXPORTED = [
-    WorldState, WorldRegion, WorldEntity, GeometryDefinition, MaterialDefinition, EnvironmentState,
+    WorldState, WorldRegion, WorldEntity, GeometryDefinition, MaterialDefinition, TextureBinding, EnvironmentState,
     PlayerState, GameplayState, WorldSpec, RegionSnapshot,
     WorldCommand, ResolvedTarget, ActionPreconditions, ValidatedAction, WorldEvent, MutationResult, WorldSync,
     ObjectBehavior, InteractionSpec, InteractionEffect, InteractionCondition,

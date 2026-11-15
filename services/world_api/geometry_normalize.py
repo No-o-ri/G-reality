@@ -23,6 +23,7 @@ SYNONYMS = {
     "translation": "translate", "move": "translate", "position": "translate", "rotation": "rotate",
     "uniform_scale": "scale", "nonuniform_scale": "stretch", "scale3": "stretch", "polar_repeat": "radial_repeat",
     "radial": "radial_repeat", "array": "repeat", "noise": "displace", "bump": "displace", "hollow": "shell",
+    "rotate_axis_angle": "rotate_axis", "axis_angle": "rotate_axis", "axis_rotate": "rotate_axis",
     "helix": "spiral_repeat", "spiral": "spiral_repeat", "helical_repeat": "spiral_repeat", "spiral_array": "spiral_repeat",
     "platonic": "polyhedron", "platonic_solid": "polyhedron", "regular_polyhedron": "polyhedron",
 }

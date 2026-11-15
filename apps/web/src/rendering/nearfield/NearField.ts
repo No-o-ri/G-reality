@@ -15,6 +15,7 @@ import { DEBUG_VIEWS, QUALITY } from "../hybrid/types";
 import { skyLighting } from "../atmosphere";
 import { buildGrid, buildInstances, GRID_CAPACITY, INSTANCE_TEXELS, type ArchetypeRuntime, type GridData, type InstanceData } from "./buffers";
 import { buildMarchFragment, COMPOSITE_FRAG, FULLSCREEN_VERT, TERRAIN_PROBE_FRAG } from "./shader";
+import { TextureLibrary, type TextureSource } from "./textures";
 
 function fullscreenTriangle(): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry();
@@ -149,6 +150,14 @@ export class NearField implements NearFieldRenderer {
   /** current lighting from the sky model (exposure and post-processing read it) */
   sky = { daylight: 1, sun: new THREE.Vector3(1, 1, 1), sunDir: new THREE.Vector3(0, 1, 0) };
   private readonly fireColors = Array.from({ length: MAX_FIRE_LIGHTS }, () => new THREE.Vector3(1, 0.46, 0.14));
+  /** CC0 photo texture sets of the open world (loaded in the background; procedural until they arrive) */
+  readonly textures = new TextureLibrary();
+  private textureSource: TextureSource | null = null;
+
+  /** Where texture maps come from (the companion), or null for none (public sample): procedural surfaces only. */
+  setTextureSource(source: TextureSource | null): void {
+    this.textureSource = source;
+  }
   private inst: InstanceData | null = null;
   private grid: GridData | null = null;
   private instTex: THREE.DataTexture | null = null;
@@ -220,6 +229,7 @@ export class NearField implements NearFieldRenderer {
     if (terrain.peak_material) extra.push(terrain.peak_material);
     if (terrain.water_material && terrain.water_level != null) extra.push(terrain.water_material);
     const scene = compileScene(defs, extra);
+    this.textures.bind(scene.materials, this.textureSource);
     const tGlsl = performance.now();
     this.scene = scene;
     const base = scene.materials.length - extra.length;
@@ -305,6 +315,11 @@ export class NearField implements NearFieldRenderer {
         uFire: { value: this.fireLights },
         uFireColor: { value: this.fireColors },
         uFireCount: { value: 0 },
+        uTexAlbedo: { value: this.textures.albedo },
+        uTexNormal: { value: this.textures.normal },
+        uTexArm: { value: this.textures.arm },
+        uMatTex: { value: this.textures.matTex },
+        uMatTint: { value: this.textures.matTint },
       },
     });
     this.marchMaterial?.dispose();
@@ -681,6 +696,7 @@ export class NearField implements NearFieldRenderer {
       gpuMs: this.timer.ms,
       shaderChars: this.shaderChars,
       compileMs: this.compileMs,
+      textures: `${this.textures.loaded}/${this.textures.bound}${this.textures.failed ? ` (${this.textures.failed} unavailable)` : ""}`,
     };
   }
 

@@ -215,6 +215,8 @@ class ArchetypeBuilder {
       }
       case "radial_repeat":
         return this.domain(node, p, mat, `opRadial(${p}, ${this.scalar(prm.count)}, ${this.scalar(prm.offset)})`);
+      case "rotate_axis":
+        return this.domain(node, p, mat, `opRotAxis(${p}, ${this.vec3(prm.axis)}, ${this.scalar(prm.angle)})`);
       case "spiral_repeat":
         return this.domain(node, p, mat,
           `opSpiral(${p}, ${this.scalar(prm.count)}, ${this.scalar(prm.pitch)}, ${this.scalar(prm.copies)})`);

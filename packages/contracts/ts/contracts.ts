@@ -267,6 +267,31 @@ export type Emissive = [unknown, unknown, unknown];
 export type EmissiveStrength = number;
 export type Id2 = string;
 export type Roughness = number;
+export type AssetId = string | null;
+/**
+ * @maxItems 6
+ */
+export type Authors =
+  | []
+  | [string]
+  | [string, string]
+  | [string, string, string]
+  | [string, string, string, string]
+  | [string, string, string, string, string]
+  | [string, string, string, string, string, string];
+export type License = "CC0-1.0";
+export type Name = string;
+export type NormalStrength = number;
+export type PageUrl = string;
+export type Query = string;
+/**
+ * real-world size of one texture tile
+ */
+export type ScaleM = number;
+/**
+ * 0 = photo colours, 1 = recoloured to base_color
+ */
+export type Tint = number;
 /**
  * procedural tint noise amplitude
  */
@@ -280,7 +305,7 @@ export type Material = string | null;
 export type Op = string;
 export type Version = number;
 export type CudaVersion = string | null;
-export type Name = string;
+export type Name1 = string;
 export type TorchVersion = string | null;
 export type VramFreeMb = number;
 export type VramTotalMb = number;
@@ -451,7 +476,7 @@ export type Status = "committed" | "rejected" | "conflict" | "error";
  * current world revision after handling the command
  */
 export type WorldRevision = number;
-export type AssetId = string;
+export type AssetId1 = string;
 export type ByteSize = number;
 export type CoordinateFrame = "world_rh_yup_m";
 export type CreatedAt1 = string;
@@ -485,7 +510,7 @@ export type State = "active" | "superseded";
  */
 export type Uri = string;
 export type WorldId3 = string;
-export type AssetId1 = string | null;
+export type AssetId2 = string | null;
 export type Attempt = number;
 export type CreatedAt2 = string;
 export type Error = string | null;
@@ -550,7 +575,7 @@ export type Materialized = boolean;
 export type Revision3 = number;
 export type SmokeDensity = number;
 export type WorldId6 = string;
-export type AssetId2 = string | null;
+export type AssetId3 = string | null;
 export type Key = string;
 export type Kind2 = "sdf_program" | "instance_buffer" | "splat_asset";
 export type SourceRevision = number;
@@ -645,7 +670,7 @@ export type Title = string;
 export type ContractVersion1 = string;
 export type CreatedAt3 = string;
 export type GeneratorVersion1 = number;
-export type Name1 = string;
+export type Name2 = string;
 export type RegionSizeM = number;
 export type Revision4 = number;
 export type Seed = number;
@@ -860,8 +885,28 @@ export interface MaterialDefinition {
   emissive_strength?: EmissiveStrength;
   id: Id2;
   roughness?: Roughness;
+  texture?: TextureBinding | null;
   variation?: Variation;
   variation_frequency?: VariationFrequency;
+}
+/**
+ * A CC0 photo texture set bound to a material when the world (or creation) is made, so the world always shows
+ * the same surface. `query` is what the language model asked for; the asset fields are filled when a match was
+ * found online (otherwise the material keeps its procedural surface). Image bytes are cached in Neon on first use.
+ *
+ * This interface was referenced by `GRealityContracts`'s JSON-Schema
+ * via the `definition` "TextureBinding".
+ */
+export interface TextureBinding {
+  asset_id?: AssetId;
+  authors?: Authors;
+  license?: License;
+  name?: Name;
+  normal_strength?: NormalStrength;
+  page_url?: PageUrl;
+  query: Query;
+  scale_m?: ScaleM;
+  tint?: Tint;
 }
 export interface Parameters {
   [k: string]: ParamSpec;
@@ -898,7 +943,7 @@ export interface Params {
  */
 export interface GpuInfo {
   cuda_version?: CudaVersion;
-  name: Name;
+  name: Name1;
   torch_version?: TorchVersion;
   vram_free_mb: VramFreeMb;
   vram_total_mb: VramTotalMb;
@@ -1085,7 +1130,7 @@ export interface Payload {
  * via the `definition` "NeuralAssetManifest".
  */
 export interface NeuralAssetManifest {
-  asset_id: AssetId;
+  asset_id: AssetId1;
   bounds: Aabb;
   byte_size: ByteSize;
   coord: RegionCoord;
@@ -1122,7 +1167,7 @@ export interface NeuralMetrics {
  * via the `definition` "NeuralGenerationJob".
  */
 export interface NeuralGenerationJob {
-  asset_id?: AssetId1;
+  asset_id?: AssetId2;
   attempt?: Attempt;
   coord: RegionCoord;
   created_at: CreatedAt2;
@@ -1214,7 +1259,7 @@ export interface WorldRegion {
  * via the `definition` "RenderCacheEntry".
  */
 export interface RenderCacheEntry {
-  asset_id?: AssetId2;
+  asset_id?: AssetId3;
   coord?: RegionCoord | null;
   key: Key;
   kind: Kind2;
@@ -1316,7 +1361,7 @@ export interface WorldState {
   environment: EnvironmentState;
   gameplay?: GameplayState;
   generator_version?: GeneratorVersion1;
-  name: Name1;
+  name: Name2;
   player: PlayerState;
   region_size_m?: RegionSizeM;
   revision: Revision4;

@@ -27,7 +27,7 @@ from greality_contracts import (
     WorldSync,
 )
 
-from . import SERVICE_VERSION
+from . import SERVICE_VERSION, textures
 from .assets import AssetIntegrityError, LocalAssetStore
 from .config import Settings, get_settings
 from .interpreter import InterpreterError, make_interpreter
@@ -149,6 +149,19 @@ def create_app(settings: Optional[Settings] = None, service: Optional[WorldServi
     def put_player(world_id: str, body: PlayerState) -> dict:
         svc().update_player(world_id, body)
         return {"ok": True}
+
+    @app.get("/v1/textures/{asset_id}/{map_name}", dependencies=[Depends(auth)])
+    def texture(asset_id: str, map_name: str) -> Response:
+        """One map (albedo | normal | arm) of a CC0 texture set: from the Neon cache, or fetched from Poly Haven on
+        first use and cached. Never needed for rendering: the client falls back to procedural surfaces."""
+        try:
+            data, mime = textures.get_map(svc().pool, asset_id, map_name)
+        except textures.TextureError as exc:
+            raise HTTPException(status_code=404, detail={"code": "texture_unavailable", "message": str(exc)})
+        except Exception as exc:  # network failure on first use
+            raise HTTPException(status_code=503, detail={"code": "texture_unavailable",
+                                                         "message": f"texture source unreachable ({type(exc).__name__})"})
+        return Response(content=data, media_type=mime, headers={"Cache-Control": "private, max-age=86400"})
 
     @app.get("/v1/jobs", response_model=list[NeuralGenerationJob], dependencies=[Depends(auth)])
     def jobs(world_id: str) -> list[NeuralGenerationJob]:
