@@ -11,9 +11,9 @@ Built at SanD Hacks 2026.
 
 - **In the browser, no install:** open the public website and press **Play the sample world**. It is a read-only
   snapshot of a generated world, rendered by the same engine.
-- **Full experience on Windows:** download `G-reality-win64.zip` from the website (or
-  [GitHub Releases](https://github.com/No-o-ri/G-reality/releases/latest)), unzip, and double-click `G-reality.cmd`.
-  See [docs/INSTALL.md](docs/INSTALL.md).
+- **Full experience on Windows:** install the companion with pip into its own Python environment and run `-m greality`, which works with Smart
+  App Control. The ZIP with a double-click `G-reality.cmd` works only when Smart App Control is off. It needs your
+  own PostgreSQL/Neon database. See [docs/INSTALL.md](docs/INSTALL.md).
 
 | Feature | Public website | Windows companion |
 |---------|----------------|-------------------|
@@ -75,7 +75,9 @@ npm run build
 - **Windows release:** `powershell -ExecutionPolicy Bypass -File scripts\build_release.ps1` builds the web app,
   stages `release\G-reality-win64` and zips it. It fails if a secrets file is staged or if any value from your
   `.env.local` appears in the package. `scripts\test_release.ps1 -EnvFile .env.local` extracts the ZIP and runs a
-  launch smoke test (migrations, Neon health, frontend, authenticated API).
+  launch smoke test (migrations, Neon health, frontend, authenticated API). Then
+  `.venv\Scripts\python scripts\build_wheel.py` packages the same staged app with the `greality` launcher
+  (`packaging/greality`) as `release\greality-<version>-py3-none-any.whl` for `pip install` + `py -m greality`.
 
 ## Layout
 

@@ -64,9 +64,9 @@ function defaultUrl(): string {
   return (import.meta.env.VITE_COMPANION_URL as string | undefined) ?? "http://127.0.0.1:8765";
 }
 
-/** Windows companion download (override with VITE_DOWNLOAD_URL at build time). */
+/** Windows companion install guide (pip install works with Smart App Control; override with VITE_DOWNLOAD_URL). */
 export const DOWNLOAD_URL =
-  (import.meta.env.VITE_DOWNLOAD_URL as string | undefined) || "https://github.com/No-o-ri/G-reality/releases/latest/download/G-reality-win64.zip";
+  (import.meta.env.VITE_DOWNLOAD_URL as string | undefined) || "https://github.com/No-o-ri/G-reality/blob/main/docs/INSTALL.md";
 
 /**
  * Public static deployment (Vercel): the page is neither served from loopback (companion release, Vite dev) nor paired

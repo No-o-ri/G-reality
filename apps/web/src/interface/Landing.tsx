@@ -64,7 +64,7 @@ export function Landing({ backend, worlds, progress, error, onGenerate, onOpen, 
           <div className="prompt-box public">
             <div className="row">
               <button className="primary" onClick={onSample} disabled={busy}>Play the sample world</button>
-              <a className="button" href={DOWNLOAD_URL}>Download for Windows</a>
+              <a className="button" href={DOWNLOAD_URL} target="_blank" rel="noopener">Install on Windows</a>
             </div>
             <p className="hint">
               The sample runs entirely in your browser: no install, no account. It is a read-only snapshot of a world the

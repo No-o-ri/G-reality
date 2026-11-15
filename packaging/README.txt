@@ -27,8 +27,16 @@ START
 4. The browser opens when the server is ready. Stop with Ctrl+C or by closing
    the launcher window.
 
-If Windows SmartScreen warns about G-reality.cmd, choose "More info" -> "Run
-anyway": it is a two-line script that starts launcher\launch.ps1.
+SMART APP CONTROL: G-reality is not code-signed. If Smart App Control is on,
+Windows blocks G-reality.cmd ("files of this type from the internet can be
+dangerous"). Do not turn Smart App Control off. Instead, install with pip into
+a private environment, in PowerShell:
+  py -3 -m venv "$env:LOCALAPPDATA\G-reality\env"
+  & "$env:LOCALAPPDATA\G-reality\env\Scripts\python.exe" -m pip install --only-binary=:all: "https://github.com/No-o-ri/G-reality/releases/download/v1.0.1/greality-1.0.1-py3-none-any.whl"
+  & "$env:LOCALAPPDATA\G-reality\env\Scripts\python.exe" -m greality --shortcut
+  & "$env:LOCALAPPDATA\G-reality\env\Scripts\python.exe" -m greality
+Full guide: https://github.com/No-o-ri/G-reality/blob/main/docs/INSTALL.md If only SmartScreen warns, choose
+"More info" -> "Run anyway": it is a two-line script that starts launcher\launch.ps1.
 
 WHAT NEEDS WHAT
 - Read-only sample world: nothing (also on the public website).
