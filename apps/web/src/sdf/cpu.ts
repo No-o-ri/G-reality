@@ -48,6 +48,34 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
         const b = v('half'), r = node.op === 'round_box' ? s('radius') : () => 0;
         distance = (p, a) => box(...p, b[0](a), b[1](a), b[2](a)) - r(a); break;
       }
+      case 'superquadric': {
+        const rv = v('radii'), ex = s('exponent');
+        distance = (p, a) => {
+          const r = [rv[0](a), rv[1](a), rv[2](a)], e = ex(a);
+          const f = Math.pow(Math.pow(Math.abs(p[0]) / r[0], e) + Math.pow(Math.abs(p[1]) / r[1], e) + Math.pow(Math.abs(p[2]) / r[2], e), 1 / e);
+          return (f - 1) * Math.min(r[0], r[1], r[2]);
+        }; break;
+      }
+      case 'curve_tube': {
+        const av = v('a'), bv = v('b'), cv = v('c'), r0 = s('radius_start'), r1 = s('radius_end');
+        distance = (p, a) => {
+          const A = [av[0](a), av[1](a), av[2](a)], B = [bv[0](a), bv[1](a), bv[2](a)], C = [cv[0](a), cv[1](a), cv[2](a)];
+          const ra = r0(a), rb = r1(a);
+          let d = 1e9;
+          let prev = A;
+          for (let i = 1; i <= 8; i++) {
+            const t = i / 8;
+            const q = [0, 1, 2].map((k) => (1 - t) * (1 - t) * A[k] + 2 * (1 - t) * t * B[k] + t * t * C[k]);
+            const x = p[0] - prev[0], y = p[1] - prev[1], z = p[2] - prev[2];
+            const bx = q[0] - prev[0], by = q[1] - prev[1], bz = q[2] - prev[2];
+            const h = clamp((x * bx + y * by + z * bz) / Math.max(bx * bx + by * by + bz * bz, 1e-8));
+            const r = ra + (rb - ra) * ((i - 1 + h) / 8);
+            d = Math.min(d, Math.hypot(x - bx * h, y - by * h, z - bz * h) - r);
+            prev = q;
+          }
+          return d;
+        }; break;
+      }
       case 'capsule': {
         const av = v('a'), bv = v('b'), r = s('radius');
         distance = (p, a) => {
@@ -121,12 +149,15 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
           return out;
         };
       }
-      case 'translate': case 'rotate': case 'scale': case 'repeat': case 'mirror': case 'twist': case 'bend': case 'warp': {
+      case 'radial_repeat': case 'taper': case 'stretch': case 'translate': case 'rotate': case 'scale': case 'repeat': case 'mirror': case 'twist': case 'bend': case 'warp': {
         const q: Vec3 = [0, 0, 0];
         const offset = node.op === 'translate' ? v('offset') : [];
         const period = node.op === 'repeat' ? v('period') : [], count = node.op === 'repeat' ? v('count') : [];
+        const stretch = node.op === 'stretch' ? v('factor') : [];
+        const radialCount = node.op === 'radial_repeat' ? s('count') : () => 1;
+        const radialOffset = node.op === 'radial_repeat' ? s('offset') : () => 0;
         const factor = node.op === 'scale' ? s('factor') : () => 1;
-        const rate = node.op === 'twist' || node.op === 'bend' ? s('rate') : () => 0;
+        const rate = node.op === 'twist' || node.op === 'bend' || node.op === 'taper' ? s('rate') : () => 0;
         const amplitude = node.op === 'warp' ? s('amplitude') : () => 0;
         const frequency = node.op === 'warp' ? s('frequency') : () => 0;
         const seed = node.op === 'warp' ? s('seed') : () => 0;
@@ -138,6 +169,15 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
           switch (node.op) {
             case 'translate': for (let i = 0; i < 3; i++) q[i] -= offset[i](a); break;
             case 'scale': for (let i = 0; i < 3; i++) q[i] /= factor(a); break;
+            case 'stretch': for (let i = 0; i < 3; i++) q[i] /= stretch[i](a); break;
+            case 'taper': { const k = Math.max(0.05, 1 + rate(a) * p[1]); q[0] /= k; q[2] /= k; break; }
+            case 'radial_repeat': {
+              const sector = 2 * Math.PI / Math.round(radialCount(a));
+              const angle = Math.atan2(p[2], p[0]) + radialOffset(a) + sector / 2;
+              const folded = angle - sector * Math.floor(angle / sector) - sector / 2;
+              const r = Math.hypot(p[0], p[2]);
+              q[0] = r * Math.cos(folded); q[2] = r * Math.sin(folded); break;
+            }
             case 'mirror': q[axis] = Math.abs(q[axis]); break;
             case 'repeat': for (let i = 0; i < 3; i++) { const per = period[i](a), c = count[i](a); q[i] -= per * clamp(Math.round(q[i] / per), -c, c); } break;
             case 'rotate': {
@@ -151,7 +191,7 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
             }
             case 'warp': { const w = warp3(p, amplitude(a), frequency(a), seed(a)); q[0] = w[0]; q[1] = w[1]; q[2] = w[2]; break; }
           }
-          const child = children[0](q, a); out.d = child.d * factor(a); out.material = child.material; return out;
+          const child = children[0](q, a); out.d = child.d * (node.op === 'stretch' ? Math.min(...stretch.map(f => f(a))) : factor(a)); out.material = child.material; return out;
         };
       }
       default: throw new Error(`Unsupported geometry op: ${node.op}`);
@@ -164,15 +204,30 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
 
 export function stepScale(def: GeometryDefinition): number {
   const visit = (n: GeometryNode): number => Math.min(
-    n.op === 'ellipsoid' ? 0.8 : n.op === 'twist' || n.op === 'bend' ? 0.6 : n.op === 'warp' || n.op === 'displace' ? 0.7 : 1,
+    n.op === 'radial_repeat' ? 0.9 : n.op === 'taper' ? 0.6 : n.op === 'ellipsoid' ? 0.8 : n.op === 'twist' || n.op === 'bend' ? 0.6 : n.op === 'warp' || n.op === 'displace' ? 0.7 : 1,
     ...(n.children ?? []).map(visit));
   return visit(def.root);
 }
 
 /** Sampling bound within the declared bounding cube, padded by a full cell. */
+/**
+ * Conservative bounds by sampling. The declared bound_radius is only a starting guess (language-model geometry often
+ * underestimates it, e.g. floating objects): the search box doubles, up to 8×, while the surface touches its edge.
+ */
 export function estimateBounds(def: GeometryDefinition, params?: Record<string, number>): { min: Vec3; max: Vec3 } {
+  let R = def.bound_radius;
+  for (let k = 0; k < 4; k++) {
+    const b = estimateBoundsIn(def, R, params);
+    const touches = b.min.some((v) => v <= -R * 0.97) || b.max.some((v) => v >= R * 0.97);
+    if (!touches || k === 3) return b;
+    R *= 2;
+  }
+  return estimateBoundsIn(def, R, params);
+}
+
+function estimateBoundsIn(def: GeometryDefinition, R: number, params?: Record<string, number>): { min: Vec3; max: Vec3 } {
   const values = params ?? Object.fromEntries(Object.entries(def.parameters ?? {}).map(([k, v]) => [k, v.max]));
-  const R = def.bound_radius, cell = 2 * R / 28, diagonal = Math.sqrt(3) * cell;
+  const cell = 2 * R / 28, diagonal = Math.sqrt(3) * cell;
   const min: Vec3 = [R, R, R], max: Vec3 = [-R, -R, -R], p: Vec3 = [0, 0, 0], evaluate = compileCpu(def);
   let found = false;
   for (let x = 0; x < 28; x++) for (let y = 0; y < 28; y++) for (let z = 0; z < 28; z++) {

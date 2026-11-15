@@ -47,8 +47,10 @@ from greality_contracts import (
     WorldRegion,
     WorldSpec,
     WorldState,
+    WorldSync,
 )
 
+from . import simulation
 from .actions import ACTIONS, ActionContext, distance, evaluate
 from .interpreter import CommandContext, IntentDraft, Interpreter, InterpreterError, RulesInterpreter
 from .regions import GENERATOR_VERSION, generate_region, region_of, regions_touching, sphere_aabb
@@ -131,12 +133,14 @@ class WorldService:
     # ------------------------------------------------------------------ worlds
 
     def create_world(self, prompt: str, seed: Optional[int] = None, name: Optional[str] = None,
-                     world_id: Optional[str] = None) -> WorldState:
-        """Interpret the prompt (provider errors propagate as InterpreterError) and commit a new world."""
-        draft = self.interpreter.world(prompt)
+                     world_id: Optional[str] = None, offline: bool = False) -> WorldState:
+        """Interpret the prompt (provider errors propagate as InterpreterError) and commit a new world.
+        offline=True uses the keyword interpreter (the world's notes say so)."""
+        interpreter = self.rules if offline else self.interpreter
+        draft = interpreter.world(prompt)
         seed = seed if seed is not None else uuid.uuid4().int % (2**31)
         spec = build_spec(draft, prompt, seed)
-        spec.interpretation_notes.insert(0, f"interpreted by {self.interpreter.name}")
+        spec.interpretation_notes.insert(0, f"interpreted by {interpreter.name}")
         world_id = world_id or f"w-{uuid.uuid4().hex[:12]}"
         player = PlayerState(player_id=PLAYER_ID, position=spec.spawn)
         gameplay = GameplayState()
@@ -162,7 +166,7 @@ class WorldService:
                 """INSERT INTO world_events (world_id, revision, event_id, tick, type, cause, payload, created_at)
                    VALUES (%s,1,%s,0,%s,'system',%s,%s)""",
                 (world_id, event_id, EventType.world_created.value,
-                 Jsonb({"prompt": prompt[:2000], "seed": seed, "interpreter": self.interpreter.name}), now),
+                 Jsonb({"prompt": prompt[:2000], "seed": seed, "interpreter": interpreter.name}), now),
             )
         return self.get_world(world_id)
 
@@ -317,7 +321,13 @@ class WorldService:
                                  if distance(cmd.player_position, e.transform.position) < 25.0}),
             aimed_kind=aimed.kind if aimed else None,
         )
-        draft, interpreter_kind, interpreter_note = self._interpret(cmd.text, context)
+        # the authoritative clock must be current before an ignition records its start tick
+        self.advance_simulation(cmd.world_id)
+        if cmd.action is not None:  # structured interaction (E key): no language interpretation
+            draft, interpreter_kind, interpreter_note = (
+                IntentDraft(action=cmd.action.value, target_kind=None, confidence=1.0), "direct", None)
+        else:
+            draft, interpreter_kind, interpreter_note = self._interpret(cmd.text, context)
         candidate, resolved_by = self._pick_target(nearby, cmd, draft.target_kind)
 
         try:
@@ -420,58 +430,10 @@ class WorldService:
                 self._store_command(cur, cmd, intent, result)
                 return result
 
-            revision = base_revision
-            events: list[WorldEvent] = []
-            changed: dict[str, WorldEntity] = {}
-            dirty: dict[tuple[int, int], DirtyRegion] = {}
-            now = _now()
-            for effect in effects:
-                revision += 1
-                event_id = f"ev-{uuid.uuid4().hex[:16]}"
-                bounds = None
-                coords: list[RegionCoord] = []
-                docs: dict[str, Any] = {}
-                for e in effect.entities:
-                    # the target row was read under the world lock above; other entities are looked up here
-                    before = changed.get(e.id) or (target if target is not None and target.id == e.id else None)
-                    if before is None:
-                        row = cur.execute("SELECT * FROM entities WHERE world_id=%s AND entity_id=%s",
-                                          (cmd.world_id, e.id)).fetchone()
-                        before = _entity_from_row(row) if row else None
-                    e.revision = revision
-                    cur.execute(_ENTITY_UPSERT, _entity_params(e))
-                    docs[e.id] = {
-                        "before": before.model_dump(mode="json") if before else None,
-                        "after": e.model_dump(mode="json"),
-                    }
-                    changed[e.id] = e
-                    box = sphere_aabb(e.transform.position, e.bound_radius)
-                    bounds = box if bounds is None else type(box)(
-                        min=tuple(min(a, b) for a, b in zip(bounds.min, box.min)),
-                        max=tuple(max(a, b) for a, b in zip(bounds.max, box.max)))
-                if bounds is not None:
-                    coords = regions_touching(bounds)
-                if effect.player is not None:
-                    player = effect.player
-                    cur.execute("UPDATE players SET state=%s, updated_at=now() WHERE world_id=%s AND player_id=%s",
-                                (Jsonb(player.model_dump(mode="json")), cmd.world_id, cmd.player_id))
-                event = WorldEvent(
-                    event_id=event_id, world_id=cmd.world_id, revision=revision, tick=gameplay.tick,
-                    type=effect.type, cause="player", command_id=cmd.command_id,
-                    entity_ids=[e.id for e in effect.entities], regions=coords, bounds=bounds,
-                    payload={**effect.payload, "entities": docs,
-                             "player": player.model_dump(mode="json") if effect.player else None},
-                    created_at=now)
-                cur.execute(
-                    """INSERT INTO world_events (world_id, revision, event_id, tick, type, cause, command_id,
-                                                 entity_ids, regions, bounds, payload, created_at)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (event.world_id, event.revision, event.event_id, event.tick, event.type.value, event.cause,
-                     event.command_id, event.entity_ids, Jsonb([c.model_dump() for c in coords]),
-                     Jsonb(bounds.model_dump(mode="json")) if bounds else None, Jsonb(event.payload), now))
-                events.append(event)
-                for d in self._bump_regions(cur, cmd.world_id, coords, revision, event_id, bounds):
-                    dirty[(d.coord.rx, d.coord.rz)] = d
+            known = {target.id: target} if target is not None else {}
+            revision, events, changed, dirty, player = self._persist_effects(
+                cur, cmd.world_id, effects, base_revision, gameplay.tick, "player", cmd.command_id, known,
+                player, cmd.player_id)
 
             if self.fault_hook is not None:
                 self.fault_hook()
@@ -485,6 +447,119 @@ class WorldService:
             if revision // SNAPSHOT_EVERY != base_revision // SNAPSHOT_EVERY:
                 self._write_snapshot(cur, cmd.world_id, revision, gameplay.tick)
             return result
+
+    def _persist_effects(self, cur, world_id: str, effects: list, base_revision: int, tick: int, cause: str,
+                         command_id: Optional[str], known: dict[str, WorldEntity],
+                         player: Optional[PlayerState] = None, player_id: str = PLAYER_ID):
+        """Write effects as consecutive world revisions: entity rows, one event each (with before/after documents
+        for replay), region revision bumps (which supersede neural assets). Caller holds the world row lock."""
+        revision = base_revision
+        events: list[WorldEvent] = []
+        changed: dict[str, WorldEntity] = {}
+        dirty: dict[tuple[int, int], DirtyRegion] = {}
+        now = _now()
+        for effect in effects:
+            revision += 1
+            event_id = f"ev-{uuid.uuid4().hex[:16]}"
+            bounds = None
+            coords: list[RegionCoord] = []
+            docs: dict[str, Any] = {}
+            for e in effect.entities:
+                before = changed.get(e.id) or known.get(e.id)
+                if before is None:
+                    row = cur.execute("SELECT * FROM entities WHERE world_id=%s AND entity_id=%s",
+                                      (world_id, e.id)).fetchone()
+                    before = _entity_from_row(row) if row else None
+                e.revision = revision
+                cur.execute(_ENTITY_UPSERT, _entity_params(e))
+                docs[e.id] = {
+                    "before": before.model_dump(mode="json") if before else None,
+                    "after": e.model_dump(mode="json"),
+                }
+                changed[e.id] = e
+                box = sphere_aabb(e.transform.position, e.bound_radius)
+                bounds = box if bounds is None else type(box)(
+                    min=tuple(min(a, b) for a, b in zip(bounds.min, box.min)),
+                    max=tuple(max(a, b) for a, b in zip(bounds.max, box.max)))
+            if bounds is not None:
+                coords = regions_touching(bounds)
+            if effect.player is not None:
+                player = effect.player
+                cur.execute("UPDATE players SET state=%s, updated_at=now() WHERE world_id=%s AND player_id=%s",
+                            (Jsonb(player.model_dump(mode="json")), world_id, player_id))
+            event = WorldEvent(
+                event_id=event_id, world_id=world_id, revision=revision, tick=tick,
+                type=effect.type, cause=cause, command_id=command_id,
+                entity_ids=[e.id for e in effect.entities], regions=coords, bounds=bounds,
+                payload={**effect.payload, "entities": docs,
+                         "player": player.model_dump(mode="json") if effect.player else None},
+                created_at=now)
+            cur.execute(
+                """INSERT INTO world_events (world_id, revision, event_id, tick, type, cause, command_id,
+                                             entity_ids, regions, bounds, payload, created_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (event.world_id, event.revision, event.event_id, event.tick, event.type.value, event.cause,
+                 event.command_id, event.entity_ids, Jsonb([c.model_dump() for c in coords]),
+                 Jsonb(bounds.model_dump(mode="json")) if bounds else None, Jsonb(event.payload), now))
+            events.append(event)
+            for d in self._bump_regions(cur, world_id, coords, revision, event_id, bounds):
+                dirty[(d.coord.rx, d.coord.rz)] = d
+        return revision, events, changed, dirty, player
+
+    # ------------------------------------------------------------------ simulation
+
+    def advance_simulation(self, world_id: str) -> tuple[int, int]:
+        """Advance the authoritative simulation clock to wall time (bounded catch-up) and persist fire changes.
+
+        Returns (tick, world_revision). Ticks are seconds of simulated time; `sim_clock_at` is the wall time of
+        `gameplay.tick`. Only discrete transitions (ignition by spreading, burn-out) are written; charring in between
+        is derived by clients from burn_started_tick (simulation.visual_burn). At most MAX_CATCHUP_TICKS of fire are
+        simulated per call; the clock itself always moves on. Time comes from the database (one clock for every
+        client), and `sim_clock_at` advances by exactly the whole seconds simulated, so no fraction is ever lost.
+        """
+        with self.pool.connection() as conn, conn.transaction():
+            cur = conn.cursor(row_factory=dict_row)
+            w = cur.execute(
+                """SELECT revision, seed, environment, gameplay, sim_clock_at, now() AS db_now
+                   FROM worlds WHERE world_id=%s FOR UPDATE""",
+                (world_id,)).fetchone()
+            if w is None:
+                raise NotFound(f"world {world_id} does not exist")
+            gameplay = GameplayState.model_validate(w["gameplay"])
+            elapsed = int((w["db_now"] - w["sim_clock_at"]).total_seconds())
+            if elapsed < 1:
+                return gameplay.tick, w["revision"]
+            revision = w["revision"]
+            burning = [_entity_from_row(r) for r in cur.execute(
+                "SELECT * FROM entities WHERE world_id=%s AND condition='burning'", (world_id,)).fetchall()]
+            target_tick = gameplay.tick + elapsed
+            if burning:
+                around = sorted({(e.region.rx + dx, e.region.rz + dz) for e in burning
+                                 for dx in (-1, 0, 1) for dz in (-1, 0, 1)})
+                candidates = [_entity_from_row(r) for r in cur.execute(
+                    """SELECT * FROM entities WHERE world_id=%s AND condition='intact'
+                       AND 'flammable' = ANY(capabilities)
+                       AND (rx, rz) IN (SELECT * FROM unnest(%s::int[], %s::int[]))""",
+                    (world_id, [a for a, _ in around], [b for _, b in around])).fetchall()]
+                env = EnvironmentState.model_validate(w["environment"])
+                _, changes = simulation.advance(gameplay.tick, target_tick, burning, candidates, env, w["seed"])
+                for tick, effects in changes:
+                    revision, _, _, _, _ = self._persist_effects(
+                        cur, world_id, effects, revision, tick, "simulation", None, {})
+                    gameplay.burned_count += sum(len(e.entities) for e in effects
+                                                 if e.type == EventType.entity_burned_out)
+            gameplay.tick = target_tick
+            cur.execute(
+                """UPDATE worlds SET revision=%s, gameplay=%s, sim_clock_at = sim_clock_at + make_interval(secs => %s),
+                          updated_at=now() WHERE world_id=%s""",
+                (revision, Jsonb(gameplay.model_dump(mode="json")), elapsed, world_id))
+            return gameplay.tick, revision
+
+    def sync(self, world_id: str, after_revision: int, limit: int = 200) -> WorldSync:
+        tick, revision = self.advance_simulation(world_id)
+        events = self.events(world_id, after_revision, limit + 1)
+        return WorldSync(world_id=world_id, tick=tick, revision=revision, events=events[:limit],
+                         truncated=len(events) > limit)
 
     @staticmethod
     def _store_command(cur, cmd: WorldCommand, intent: ParsedIntent, result: MutationResult) -> None:
@@ -610,6 +685,13 @@ class WorldService:
                    WHERE job_id=%s AND state = ANY(%s)""",
                 (state.value, error, state.value, terminal, job_id, list(LIVE_JOB_STATES))).rowcount
         return n == 1
+
+    def asset_manifest(self, asset_id: str) -> NeuralAssetManifest:
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT manifest FROM neural_assets WHERE asset_id=%s", (asset_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"asset {asset_id} does not exist")
+        return NeuralAssetManifest.model_validate(row[0])
 
     def jobs(self, world_id: str, limit: int = 100) -> list[NeuralGenerationJob]:
         with self.pool.connection() as conn:

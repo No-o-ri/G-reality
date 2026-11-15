@@ -340,6 +340,8 @@ class WorldCommand(Contract):
     player_position: Vec3
     view_direction: Vec3
     expected_world_revision: Optional[int] = Field(default=None, ge=0)
+    action: Optional[ActionType] = Field(
+        default=None, description="structured interaction (e.g. the E key); when set, no language interpretation runs")
 
 
 class ParsedIntent(Contract):
@@ -348,7 +350,7 @@ class ParsedIntent(Contract):
     action: ActionType
     target_kind: Optional[str] = None
     build_geometry_id: Optional[str] = None
-    interpreter: Literal["llm", "rules"]
+    interpreter: Literal["llm", "rules", "direct"]
     confidence: float = Field(ge=0.0, le=1.0)
 
 
@@ -426,6 +428,16 @@ class DirtyRegion(Contract):
     stale_asset_id: Optional[str] = None
 
 
+class WorldSync(Contract):
+    """Poll response: the simulation is advanced to wall-clock time first, then events after a revision are returned."""
+
+    world_id: str = Id
+    tick: int = Field(ge=0, description="simulation tick after advancing (1 tick = 1 s)")
+    revision: int = Field(ge=0)
+    events: list[WorldEvent] = Field(default_factory=list)
+    truncated: bool = Field(default=False, description="more events exist; reload regions instead of replaying")
+
+
 class MutationResult(Contract):
     status: Literal["committed", "rejected", "conflict", "error"]
     command_id: str
@@ -476,7 +488,8 @@ class CaptureView(Contract):
 
 
 class ViewBundleManifest(Contract):
-    """Describes an uploaded set of views. Images: sRGB8 PNG. Depth: float32 linear meters along -Z, 0 = miss."""
+    """Describes an uploaded set of views. Images: sRGB8 PNG. Depth: float32 linear meters along -Z, 0 = miss,
+    -1 = unobserved (the ray entered the region's clip box inside a solid; ignored by training and evaluation)."""
 
     job_id: str = Id
     world_id: str = Id
@@ -588,7 +601,7 @@ class ApiError(Contract):
 EXPORTED = [
     WorldState, WorldRegion, WorldEntity, GeometryDefinition, MaterialDefinition, EnvironmentState,
     PlayerState, GameplayState, WorldSpec, RegionSnapshot,
-    WorldCommand, ResolvedTarget, ActionPreconditions, ValidatedAction, WorldEvent, MutationResult,
+    WorldCommand, ResolvedTarget, ActionPreconditions, ValidatedAction, WorldEvent, MutationResult, WorldSync,
     RegionRevision, DirtyRegion, NeuralGenerationJob, NeuralAssetManifest, RenderCacheEntry,
     ViewBundleManifest, HealthReport, ApiError,
 ]

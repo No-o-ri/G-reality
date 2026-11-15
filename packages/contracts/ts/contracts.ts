@@ -296,7 +296,7 @@ export type BaseWorldRevision = number;
 export type CommandId = string;
 export type BuildGeometryId = string | null;
 export type Confidence = number;
-export type Interpreter = "llm" | "rules";
+export type Interpreter = "llm" | "rules" | "direct";
 export type TargetKind = string | null;
 export type DistanceM = number;
 /**
@@ -555,6 +555,17 @@ export type Revision4 = number;
 export type Seed = number;
 export type UpdatedAt = string;
 export type WorldId10 = string;
+export type Events1 = WorldEvent[];
+export type Revision5 = number;
+/**
+ * simulation tick after advancing (1 tick = 1 s)
+ */
+export type Tick2 = number;
+/**
+ * more events exist; reload regions instead of replaying
+ */
+export type Truncated = boolean;
+export type WorldId11 = string;
 
 export interface GRealityContracts {
   [k: string]: unknown;
@@ -1070,7 +1081,8 @@ export interface TerrainDefinition {
   water_material?: MaterialDefinition | null;
 }
 /**
- * Describes an uploaded set of views. Images: sRGB8 PNG. Depth: float32 linear meters along -Z, 0 = miss.
+ * Describes an uploaded set of views. Images: sRGB8 PNG. Depth: float32 linear meters along -Z, 0 = miss,
+ * -1 = unobserved (the ray entered the region's clip box inside a solid; ignored by training and evaluation).
  *
  * This interface was referenced by `GRealityContracts`'s JSON-Schema
  * via the `definition` "ViewBundleManifest".
@@ -1088,6 +1100,10 @@ export interface ViewBundleManifest {
  * via the `definition` "WorldCommand".
  */
 export interface WorldCommand {
+  /**
+   * structured interaction (e.g. the E key); when set, no language interpretation runs
+   */
+  action?: ActionType | null;
   command_id: CommandId3;
   expected_world_revision?: ExpectedWorldRevision;
   player_id: PlayerId1;
@@ -1134,4 +1150,17 @@ export interface WorldState {
   status: GenerationStatus;
   updated_at: UpdatedAt;
   world_id: WorldId10;
+}
+/**
+ * Poll response: the simulation is advanced to wall-clock time first, then events after a revision are returned.
+ *
+ * This interface was referenced by `GRealityContracts`'s JSON-Schema
+ * via the `definition` "WorldSync".
+ */
+export interface WorldSync {
+  events?: Events1;
+  revision: Revision5;
+  tick: Tick2;
+  truncated?: Truncated;
+  world_id: WorldId11;
 }

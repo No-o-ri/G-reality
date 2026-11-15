@@ -121,7 +121,8 @@ mismatch is 0.009 mm. This change is `GENERATOR_VERSION = 2`.
 
 ### 5.1 Representation
 Standard 3DGS parameters per Gaussian: center (3), log-scale (3), rotation quaternion (4), opacity logit
-(1), SH degree-0 color (3). Serialized as standard 3DGS binary PLY (property names of the reference
+(1), SH degree-0 color (3) plus degree-1 coefficients (9, view-dependent color; added in Chunk 3 because water
+reflections are view-dependent). Serialized as standard 3DGS binary PLY (property names of the reference
 implementation), one file per region revision, content-addressed. `NeuralAssetManifest` records region,
 `region_revision`, bounds, count, sha256, metrics and the producing job.
 
@@ -131,14 +132,22 @@ implementation), one file per region revision, content-addressed. `NeuralAssetMa
    region AABB plus a 2 m margin, fog off, transparent background) from 28 cameras on two rings and a top
    cap (distance 1.5–3 region sizes, looking at the region center), 24 train + 4 holdout, at 256² (512² on
    Ultra). Each view yields sRGB8 color and float32 linear depth with exact intrinsics/extrinsics
-   (`ViewBundleManifest`, tagged with the region revision it rendered).
-3. **Initialize** — unproject train depths to a colored point cloud, voxel-downsample (0.4–1.0 m by
-   profile) to 15k–60k points; scale from voxel size, identity rotation, opacity 0.5.
-4. **Optimize** — Adam over all parameters, loss = L1 + 0.2·(1 − SSIM) on RGB plus L1 on alpha, random
-   background color per step, one view per step, 300–1500 iterations by profile; prune opacity < 0.02
-   every 200 steps. No densification in the baseline (the depth init already covers the surface).
+   (`ViewBundleManifest`, tagged with the region revision it rendered). *As built (Chunk 3):* rings at 10°, 32°
+   and 62° elevation, holdouts at 21° between training azimuths, 2× supersampled; a ray that enters the clip box
+   inside a solid is recorded as **unobserved** (depth −1) rather than empty, because in the world that ray is
+   blocked by the neighbouring region; training and evaluation ignore those pixels.
+3. **Initialize** — unproject train depths to a colored point cloud, voxel-downsample (voxel size searched
+   so the count fits the profile budget, 15k–60k); scale from the mean 3-NN distance, identity rotation,
+   opacity 0.3.
+4. **Optimize** — Adam over all parameters, loss = 0.8·L1 + 0.2·(1 − SSIM) on RGB, + 0.5·L1 on alpha,
+   + 0.1·relative L1 on expected depth (the capture has exact depth), random background color per step, one
+   view per step, 600–3500 iterations by profile (balanced 1500); prune opacity < 0.02 and centers outside
+   the padded box every 200 steps. No densification. Hard VRAM cap via
+   `torch.cuda.set_per_process_memory_fraction` (3.5 GiB default; exceeding it fails the job cleanly).
 5. **Validate** — finite parameters, all centers inside padded bounds, count > 0, holdout PSNR ≥ 20 dB
-   (threshold tuned in Chunk 3). Failure ⇒ job `failed`, region stays on the fallback path.
+   (full image over observed pixels, on black), the written PLY decodes and renders identically to the
+   in-memory model. Re-validated independently on the Windows side before publication. Failure ⇒ job
+   `failed`, region stays on the fallback path.
 6. **Publish** — write PLY to the storage adapter, then the compare-and-set transaction in §7.4.
 
 Step 4 is real gradient-based 3DGS fitting through a differentiable rasterizer; it is honest to call it
@@ -149,6 +158,9 @@ generative model.
 1. `torch` (baseline, guaranteed): EWA projection, 16-px tiles, per-tile depth sort, front-to-back alpha
    compositing with cumulative transmittance, tiles processed in chunks to bound memory.
 2. `gsplat` (accelerator, time-boxed 45 min, needs the CUDA Toolkit installed): same inputs/outputs.
+   *Chunk 3 result:* unavailable — no prebuilt wheel for torch 2.14 / CUDA 13 / Python 3.14, and the JIT build
+   needs nvcc and a host C++ compiler, neither present in the WSL distribution (no gcc; sudo needs a password).
+   `services/gpu/rasterizers/gsplat_backend.py` records the diagnosis and the unblock steps.
 3. Reductions if tier 1 is too slow: 128² views, ≤ 10k Gaussians, optimize color/opacity/scale only.
 4. Last resort: bake regions ahead of the demo with tier 1 and serve from cache — still genuinely optimized.
 

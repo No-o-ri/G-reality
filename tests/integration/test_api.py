@@ -56,3 +56,45 @@ def test_command_round_trip_over_http(client, world):
     events = client.get(f"/v1/worlds/{world.world_id}/events?after_revision=1", headers=auth()).json()
     assert [e["type"] for e in events] == ["entity_ignited"]
     assert client.get(f"/v1/worlds/{world.world_id}", headers=auth()).json()["revision"] == 2
+
+
+def test_published_asset_is_served_with_integrity_check(service, settings, world, tmp_path):
+    import hashlib
+
+    import numpy as np
+    from greality_contracts import Aabb, JobState, NeuralMetrics
+
+    from gpu.ply import GaussianArrays, decode_ply, encode_ply
+    from world_api.assets import LocalAssetStore, asset_key
+
+    store = LocalAssetStore(tmp_path)
+    coord = region_of(world.player.position[0], world.player.position[2])
+    service.load_regions(world.world_id, [coord])
+    job = service.enqueue_job(world.world_id, coord, reason="manual")
+    assert service.set_job_state(job.job_id, JobState.validating)
+    n = 5
+    g = GaussianArrays(means=np.zeros((n, 3), np.float32), log_scales=np.full((n, 3), -2, np.float32),
+                       quats=np.tile(np.array([1, 0, 0, 0], np.float32), (n, 1)),
+                       opacity_logits=np.zeros(n, np.float32), sh_dc=np.zeros((n, 3), np.float32))
+    data = encode_ply(g)
+    sha = hashlib.sha256(data).hexdigest()
+    key = asset_key(world.world_id, coord.rx, coord.rz, job.source_region_revision, sha)
+    store.put(key, data)
+    status, manifest = service.publish_asset(
+        job.job_id, uri=key, sha256=sha, byte_size=len(data), gaussian_count=n, fmt="ply", sh_degree=0,
+        origin=(coord.rx * 64.0, 0.0, coord.rz * 64.0), bounds=Aabb(min=(0, 0, 0), max=(1, 1, 1)),
+        metrics=NeuralMetrics(rasterizer="torch", iterations=1, gaussian_count=n, capture_seconds=0, train_seconds=0))
+    assert status == "published"
+    with TestClient(create_app(settings, service=service, token=TOKEN, store=store)) as c:
+        assert c.get(f"/v1/assets/{manifest.asset_id}").status_code == 401
+        r = c.get(f"/v1/assets/{manifest.asset_id}", headers=auth())
+        assert r.status_code == 200 and r.content == data
+        assert decode_ply(r.content).count == n
+        snap = c.post(f"/v1/worlds/{world.world_id}/regions:batch", headers=auth(),
+                      json={"coords": [{"rx": coord.rx, "rz": coord.rz}]}).json()[0]
+        assert snap["neural_asset"]["asset_id"] == manifest.asset_id
+        assert snap["neural_asset"]["region_revision"] == snap["region"]["revision"]
+        store.path(key).write_bytes(data[:-4])  # truncated file is refused, never served
+        bad = c.get(f"/v1/assets/{manifest.asset_id}", headers=auth())
+        assert bad.status_code == 500 and bad.json()["detail"]["code"] == "asset_corrupt"
+        assert c.get("/v1/assets/asset-missing", headers=auth()).status_code == 404

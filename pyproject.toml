@@ -22,5 +22,6 @@ testpaths = ["tests"]
 markers = [
     "neon: needs DATABASE_URL pointing at the Neon dev branch",
     "gemini: calls the real Gemini API (needs GEMINI_API_KEY)",
+    "cuda: needs CUDA PyTorch (runs in WSL2, see docs/testing/CHUNK3_RESULTS.md)",
 ]
 addopts = "-q -p no:cacheprovider"

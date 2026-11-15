@@ -9,7 +9,7 @@ import type { GeometryDefinition, GeometryNode, MaterialDefinition } from "@cont
 
 export const MAX_ARCHETYPE_PARAMS = 4;
 
-const STEP_SCALE: Record<string, number> = { ellipsoid: 0.8, twist: 0.6, bend: 0.6, warp: 0.7, displace: 0.7 };
+const STEP_SCALE: Record<string, number> = { superquadric: 0.6, curve_tube: 0.95, ellipsoid: 0.8, radial_repeat: 0.9, taper: 0.6, stretch: 1, twist: 0.6, bend: 0.6, warp: 0.7, displace: 0.7 };
 
 export interface CompiledArchetype {
   id: string;
@@ -132,6 +132,13 @@ class ArchetypeBuilder {
         return this.leaf(`sdBox(${p}, ${this.vec3(prm.half)})`, mat);
       case "round_box":
         return this.leaf(`sdRoundBox(${p}, ${this.vec3(prm.half)}, ${this.scalar(prm.radius)})`, mat);
+      case "superquadric":
+        return this.leaf(`sdSuperquadric(${p}, ${this.vec3(prm.radii)}, ${this.scalar(prm.exponent)})`, mat);
+      case "curve_tube":
+        return this.leaf(
+          `sdCurveTube(${p}, ${this.vec3(prm.a)}, ${this.vec3(prm.b)}, ${this.vec3(prm.c)}, ${this.scalar(prm.radius_start)}, ${this.scalar(prm.radius_end)})`,
+          mat,
+        );
       case "capsule":
         return this.leaf(`sdCapsule(${p}, ${this.vec3(prm.a)}, ${this.vec3(prm.b)}, ${this.scalar(prm.radius)})`, mat);
       case "cylinder":
@@ -196,6 +203,18 @@ class ArchetypeBuilder {
         this.lines.push(`float ${d} = ${inner.d} * ${s};`);
         return { ...inner, d };
       }
+      case "stretch": {
+        const factor = this.id("s");
+        this.lines.push(`vec3 ${factor} = ${this.vec3(prm.factor)};`);
+        const inner = this.domain(node, p, mat, `${p} / ${factor}`);
+        const d = this.id("d");
+        this.lines.push(`float ${d} = ${inner.d} * min(${factor}.x, min(${factor}.y, ${factor}.z));`);
+        return { ...inner, d };
+      }
+      case "radial_repeat":
+        return this.domain(node, p, mat, `opRadial(${p}, ${this.scalar(prm.count)}, ${this.scalar(prm.offset)})`);
+      case "taper":
+        return this.domain(node, p, mat, `opTaper(${p}, ${this.scalar(prm.rate)})`);
       case "repeat":
         return this.domain(node, p, mat, `opRepeat(${p}, ${this.vec3(prm.period)}, ${this.vec3(prm.count)})`);
       case "mirror": {
@@ -292,6 +311,13 @@ export function compileScene(defs: GeometryDefinition[], extraMaterials: Materia
       return `    case ${i}: return vec4(${glslFloat(m.variation ?? 0)}, ${glslFloat(m.variation_frequency ?? 1)}, ${glslFloat(lum)}, 0.0);`;
     })
     .join("\n");
+  const emission = materials
+    .map((m, i) => {
+      const e = (m.emissive ?? [0, 0, 0]) as number[];
+      const k = m.emissive_strength ?? 0;
+      return `    case ${i}: return vec3(${glslFloat(e[0] * k)}, ${glslFloat(e[1] * k)}, ${glslFloat(e[2] * k)});`;
+    })
+    .join("\n");
 
   const glsl = `${functions.join("\n\n")}
 
@@ -307,6 +333,13 @@ vec4 materialColor(int m) {
 ${color || "    case 0: return vec4(0.5, 0.5, 0.5, 0.8);"}
   }
   return vec4(1.0, 0.0, 1.0, 0.8);
+}
+// emitted radiance (linear RGB, emissive color × strength) of a material
+vec3 materialEmissive(int m) {
+  switch (m) {
+${emission || "    case 0: return vec3(0.0);"}
+  }
+  return vec3(0.0);
 }
 // x = variation amplitude, y = variation frequency, z = emissive luminance
 vec4 materialExtra(int m) {

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import secrets
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from greality_contracts import (
@@ -23,9 +24,11 @@ from greality_contracts import (
     WorldCommand,
     WorldEvent,
     WorldState,
+    WorldSync,
 )
 
 from . import SERVICE_VERSION
+from .assets import AssetIntegrityError, LocalAssetStore
 from .config import Settings, get_settings
 from .interpreter import InterpreterError, make_interpreter
 from .service import NotFound, WorldService, make_pool
@@ -35,6 +38,7 @@ class CreateWorldRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=2000)
     seed: Optional[int] = Field(default=None, ge=0, le=2**31 - 1)
     name: Optional[str] = Field(default=None, max_length=80)
+    offline: bool = Field(default=False, description="use the keyword interpreter instead of the language model")
 
 
 class RegionBatchRequest(BaseModel):
@@ -42,8 +46,9 @@ class RegionBatchRequest(BaseModel):
 
 
 def create_app(settings: Optional[Settings] = None, service: Optional[WorldService] = None,
-               token: Optional[str] = None) -> FastAPI:
+               token: Optional[str] = None, store: Optional[LocalAssetStore] = None) -> FastAPI:
     settings = settings or get_settings()
+    store = store or LocalAssetStore()
     token = token or secrets.token_urlsafe(32)
     state: dict = {"service": service}
 
@@ -111,7 +116,7 @@ def create_app(settings: Optional[Settings] = None, service: Optional[WorldServi
 
     @app.post("/v1/worlds", response_model=WorldState, dependencies=[Depends(auth)])
     def create_world(body: CreateWorldRequest) -> WorldState:
-        return svc().create_world(body.prompt, body.seed, body.name)
+        return svc().create_world(body.prompt, body.seed, body.name, offline=body.offline)
 
     @app.get("/v1/worlds", dependencies=[Depends(auth)])
     def list_worlds() -> list[dict]:
@@ -131,6 +136,11 @@ def create_app(settings: Optional[Settings] = None, service: Optional[WorldServi
             raise HTTPException(status_code=400, detail={"code": "world_mismatch", "message": "world_id differs from path"})
         return svc().handle_command(body)
 
+    @app.get("/v1/worlds/{world_id}/sync", response_model=WorldSync, dependencies=[Depends(auth)])
+    def sync(world_id: str, after_revision: int = 0, limit: int = 200) -> WorldSync:
+        """Advance the simulation to now, then return events after `after_revision` (clients poll this ~1/s)."""
+        return svc().sync(world_id, after_revision, min(max(limit, 1), 500))
+
     @app.get("/v1/worlds/{world_id}/events", response_model=list[WorldEvent], dependencies=[Depends(auth)])
     def events(world_id: str, after_revision: int = 0, limit: int = 200) -> list[WorldEvent]:
         return svc().events(world_id, after_revision, limit)
@@ -144,4 +154,37 @@ def create_app(settings: Optional[Settings] = None, service: Optional[WorldServi
     def jobs(world_id: str) -> list[NeuralGenerationJob]:
         return svc().jobs(world_id)
 
+    @app.get("/v1/assets/{asset_id}", dependencies=[Depends(auth)])
+    def asset(asset_id: str) -> Response:
+        """Bytes of a published Gaussian asset (any state; clients check region_revision before showing it)."""
+        manifest = svc().asset_manifest(asset_id)
+        try:
+            data = store.get(manifest.uri, manifest.sha256)
+        except FileNotFoundError:
+            raise NotFound(f"asset {asset_id} is recorded but its file is missing from the asset store")
+        except AssetIntegrityError as exc:
+            raise HTTPException(status_code=500, detail={"code": "asset_corrupt", "message": str(exc)})
+        return Response(content=data, media_type="application/octet-stream",
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+    if settings.web_dir:
+        _mount_web(app, Path(settings.web_dir))
     return app
+
+
+def _mount_web(app: FastAPI, web_dir: Path) -> None:
+    """Serve the built frontend from the companion's own origin (release mode); unknown paths fall back to index.html."""
+    from fastapi.responses import FileResponse
+
+    root = web_dir.resolve()
+    index = root / "index.html"
+    if not index.is_file():
+        raise RuntimeError(f"GREALITY_WEB_DIR has no index.html: {root}")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def web(path: str):
+        target = (root / path).resolve() if path else index
+        if root not in target.parents and target != index or not target.is_file():
+            target = index
+        headers = {"Cache-Control": "no-cache"} if target == index else {"Cache-Control": "public, max-age=3600"}
+        return FileResponse(target, headers=headers)

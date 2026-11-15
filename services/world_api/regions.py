@@ -27,7 +27,9 @@ from .terrain import stable_unit, terrain_height, terrain_slope
 #   2: exact integer lattice hash (Chunk 2).
 #   3: buildings are kept clear of scattered objects, and discrete placements retry nearby when the first
 #      spot is too steep or under water (Chunk 2 QA).
-GENERATOR_VERSION = 3
+#   4: archetypes are generated per world (procgen.py) instead of taken from the fixed library, and trees get a
+#      per-entity tilt (lean) in addition to yaw, scale and crown fullness (Chunk 4).
+GENERATOR_VERSION = 4
 MIN_RENDERABLE_GENERATOR_VERSION = 2
 MAX_ENTITIES_PER_REGION = 400
 
@@ -70,14 +72,36 @@ def _accept(spec: WorldSpec, seed: int, f: FeatureSpec, x: float, z: float) -> f
     return h
 
 
-def _entity(world_id: str, seed: int, f: FeatureSpec, tag: str, x: float, h: float, z: float) -> WorldEntity:
+def _archetypes(spec: WorldSpec) -> dict:
+    return {a.id: a for a in spec.archetypes}
+
+
+def _lean_quat(yaw: float, lean: float, lean_dir: float) -> tuple[float, float, float, float]:
+    """Yaw about +Y, then a small tilt `lean` (radians) about a horizontal axis at angle `lean_dir`."""
+    ax, az = math.cos(lean_dir), math.sin(lean_dir)
+    s, c = math.sin(lean * 0.5), math.cos(lean * 0.5)
+    tx, ty, tz, tw = ax * s, 0.0, az * s, c  # tilt
+    yx, yy, yz, yw = 0.0, math.sin(yaw * 0.5), 0.0, math.cos(yaw * 0.5)  # yaw
+    # q = tilt * yaw
+    return (tw * yx + tx * yw + ty * yz - tz * yy,
+            tw * yy - tx * yz + ty * yw + tz * yx,
+            tw * yz + tx * yy - ty * yx + tz * yw,
+            tw * yw - tx * yx - ty * yy - tz * yz)
+
+
+def _entity(world_id: str, seed: int, f: FeatureSpec, tag: str, x: float, h: float, z: float,
+            spec: WorldSpec | None = None, version: int = 3) -> WorldEntity:
     coord = region_of(x, z)
     scale = f.scale_range[0] + (f.scale_range[1] - f.scale_range[0]) * stable_unit(seed, f.id, tag, "scale")
     yaw = 2.0 * math.pi * stable_unit(seed, f.id, tag, "yaw")
+    rotation = _yaw_quat(yaw)
+    if version >= 4 and f.entity_kind == "tree":
+        lean = 0.11 * stable_unit(seed, f.id, tag, "lean") ** 1.5
+        rotation = _lean_quat(yaw, lean, 2.0 * math.pi * stable_unit(seed, f.id, tag, "lean-dir"))
     params = {
         name: lo + (hi - lo) * stable_unit(seed, f.id, tag, name) for name, (lo, hi) in sorted(f.param_ranges.items())
     }
-    archetype = library().get(f.geometry_id)
+    archetype = (_archetypes(spec) if spec is not None else {}).get(f.geometry_id) or library().get(f.geometry_id)
     base_radius = archetype.bound_radius if archetype else 5.0
     return WorldEntity(
         id=f"e:{coord.rx}:{coord.rz}:{f.id}:{tag}",
@@ -85,7 +109,7 @@ def _entity(world_id: str, seed: int, f: FeatureSpec, tag: str, x: float, h: flo
         kind=f.entity_kind,
         geometry_id=f.geometry_id,
         geometry_params=params,
-        transform=Transform(position=(x, h, z), rotation=_yaw_quat(yaw), scale=scale),
+        transform=Transform(position=(x, h, z), rotation=rotation, scale=scale),
         region=coord,
         bound_radius=min(200.0, base_radius * scale),
         capabilities=list(f.capabilities),
@@ -143,8 +167,8 @@ def discrete_placements(spec: WorldSpec, seed: int, version: int) -> list[tuple[
     return cached
 
 
-def _bound(geometry_id: str) -> float:
-    archetype = library().get(geometry_id)
+def _bound(geometry_id: str, spec: WorldSpec | None = None) -> float:
+    archetype = (_archetypes(spec) if spec is not None else {}).get(geometry_id) or library().get(geometry_id)
     return archetype.bound_radius if archetype else 5.0
 
 
@@ -155,17 +179,17 @@ def generate_region(world_id: str, spec: WorldSpec, seed: int, coord: RegionCoor
     placed = discrete_placements(spec, seed, generator_version)
     for f, i, x, h, z in placed:
         if x0 <= x < x1 and z0 <= z < z1:
-            out.append(_entity(world_id, seed, f, f"n{i}", x, h, z))
+            out.append(_entity(world_id, seed, f, f"n{i}", x, h, z, spec, generator_version))
     # From version 3, scattered objects keep clear of discrete ones (no trees growing through houses).
     keep_clear = [
-        (x, z, _bound(f.geometry_id) * _DISCRETE_FOOTPRINT * f.scale_range[1])
+        (x, z, _bound(f.geometry_id, spec) * _DISCRETE_FOOTPRINT * f.scale_range[1])
         for f, _, x, _, z in placed
         if x0 - 40.0 <= x < x1 + 40.0 and z0 - 40.0 <= z < z1 + 40.0
     ] if generator_version >= 3 else []
     for f in spec.features:
         if f.count > 0 or f.density_per_ha <= 0.0:
             continue
-        own = _bound(f.geometry_id) * _SCATTER_FOOTPRINT * f.scale_range[1]
+        own = _bound(f.geometry_id, spec) * _SCATTER_FOOTPRINT * f.scale_range[1]
         spacing = math.sqrt(10000.0 / f.density_per_ha)
         gx0, gx1 = math.floor(x0 / spacing), math.floor(x1 / spacing)
         gz0, gz1 = math.floor(z0 / spacing), math.floor(z1 / spacing)
@@ -179,6 +203,6 @@ def generate_region(world_id: str, spec: WorldSpec, seed: int, coord: RegionCoor
                     continue
                 h = _accept(spec, seed, f, x, z)
                 if h is not None:
-                    out.append(_entity(world_id, seed, f, f"g{gx}_{gz}", x, h, z))
+                    out.append(_entity(world_id, seed, f, f"g{gx}_{gz}", x, h, z, spec, generator_version))
     out.sort(key=lambda e: e.id)
     return out[:MAX_ENTITIES_PER_REGION]

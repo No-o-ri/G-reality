@@ -1566,7 +1566,8 @@
         "interpreter": {
           "enum": [
             "llm",
-            "rules"
+            "rules",
+            "direct"
           ],
           "title": "Interpreter",
           "type": "string"
@@ -2182,7 +2183,7 @@
     },
     "ViewBundleManifest": {
       "additionalProperties": false,
-      "description": "Describes an uploaded set of views. Images: sRGB8 PNG. Depth: float32 linear meters along -Z, 0 = miss.",
+      "description": "Describes an uploaded set of views. Images: sRGB8 PNG. Depth: float32 linear meters along -Z, 0 = miss,\n-1 = unobserved (the ray entered the region's clip box inside a solid; ignored by training and evaluation).",
       "properties": {
         "coord": {
           "$ref": "#/$defs/RegionCoord"
@@ -2239,6 +2240,18 @@
     "WorldCommand": {
       "additionalProperties": false,
       "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "structured interaction (e.g. the E key); when set, no language interpretation runs"
+        },
         "command_id": {
           "description": "client UUID, idempotency key",
           "maxLength": 64,
@@ -2766,6 +2779,50 @@
         "updated_at"
       ],
       "title": "WorldState",
+      "type": "object"
+    },
+    "WorldSync": {
+      "additionalProperties": false,
+      "description": "Poll response: the simulation is advanced to wall-clock time first, then events after a revision are returned.",
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/WorldEvent"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "tick": {
+          "description": "simulation tick after advancing (1 tick = 1 s)",
+          "minimum": 0,
+          "title": "Tick",
+          "type": "integer"
+        },
+        "truncated": {
+          "default": false,
+          "description": "more events exist; reload regions instead of replaying",
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "world_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_\\-:.]+$",
+          "title": "World Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "world_id",
+        "tick",
+        "revision"
+      ],
+      "title": "WorldSync",
       "type": "object"
     }
   },

@@ -37,6 +37,18 @@ function sunFrom(env: WorldState["environment"]): THREE.Vector3 {
   return new THREE.Vector3(Math.cos(azimuth) * 0.8, elevation, 0.45).normalize();
 }
 
+/** Daylight factor 0 (night) .. 1 (day) from the hour; scales sun and sky so dark scenes are actually dark. */
+export function daylight(env: WorldState["environment"]): number {
+  const h = env.time_of_day_h ?? 10;
+  const e = Math.sin(((h - 6) / 12) * Math.PI);
+  return Math.min(1, Math.max(0, (e + 0.08) / 0.35));
+}
+
+function scaledColor(rgb: number[], dayK: number, night: [number, number, number]): THREE.Vector3 {
+  return new THREE.Vector3(
+    rgb[0] * dayK + night[0] * (1 - dayK), rgb[1] * dayK + night[1] * (1 - dayK), rgb[2] * dayK + night[2] * (1 - dayK));
+}
+
 export function terrainStepFactor(t: TerrainDefinition): number {
   const octaves = t.octaves ?? 5;
   const slope = (t.amplitude ?? 30) * (t.frequency ?? 0.008) * octaves * 1.5 * (1 + (t.ridge ?? 0));
@@ -83,6 +95,28 @@ class GpuTimer {
   }
 }
 
+/**
+ * One reconstruction view: sRGB8 RGBA (straight alpha = coverage) and linear depth, both with row 0 at the top.
+ * Depth −1 marks unobserved pixels (a sample entered the clip box inside a solid); their RGBA is 0.
+ */
+export interface CapturedView {
+  width: number;
+  height: number;
+  rgba: Uint8Array;
+  depth: Float32Array;
+  hitFraction: number;
+  unobservedFraction: number;
+}
+
+export const MAX_FIRE_LIGHTS = 8;
+
+/** Per-frame, derived visual state of one entity (from authoritative timestamps), written without a rebuild. */
+export interface DynamicVisual {
+  params?: Record<string, number>;
+  burning?: boolean;
+  burnVisual?: number;
+}
+
 export interface PickResult {
   entityId: string;
   distance: number;
@@ -108,6 +142,10 @@ export class NearField implements NearFieldRenderer {
   private cpuFns = new Map<string, SdfFn>();
   private defs = new Map<string, GeometryDefinition>();
   private entities: WorldEntity[] = [];
+  private entityById = new Map<string, WorldEntity>();
+  private rowById = new Map<string, number>();
+  private readonly fireLights = Array.from({ length: MAX_FIRE_LIGHTS }, () => new THREE.Vector4());
+  private readonly fireColors = Array.from({ length: MAX_FIRE_LIGHTS }, () => new THREE.Vector3(1, 0.46, 0.14));
   private inst: InstanceData | null = null;
   private grid: GridData | null = null;
   private instTex: THREE.DataTexture | null = null;
@@ -238,11 +276,19 @@ export class NearField implements NearFieldRenderer {
         uTerrainBasin: { value: new THREE.Vector4(basin ? basin[0] : 0, basin ? basin[1] : 0, basin ? (terrain.basin_radius ?? 0) : 0, terrain.basin_depth ?? 0) },
         uSeedOffset: { value: new THREE.Vector2(seed & 1023, (seed >> 10) & 1023) },
         uSunDir: { value: sunFrom(env) },
-        uSunColor: { value: new THREE.Vector3(...((env.sun_color ?? [1, 0.95, 0.85]) as [number, number, number])) },
-        uSkyColor: { value: new THREE.Vector3(...((env.sky_color ?? [0.45, 0.62, 0.85]) as [number, number, number])) },
-        uFogColor: { value: new THREE.Vector3(...((env.fog_color ?? [0.7, 0.76, 0.82]) as [number, number, number])) },
+        // night: the sun becomes faint cool moonlight and the sky / fog darken
+        uSunColor: { value: scaledColor((env.sun_color ?? [1, 0.95, 0.85]) as number[], daylight(env), [0.09, 0.11, 0.17]) },
+        uSkyColor: { value: scaledColor((env.sky_color ?? [0.45, 0.62, 0.85]) as number[], daylight(env), [0.025, 0.035, 0.07]) },
+        uFogColor: { value: scaledColor((env.fog_color ?? [0.7, 0.76, 0.82]) as number[], daylight(env), [0.03, 0.04, 0.06]) },
         uAmbient: { value: env.ambient ?? 0.25 },
         uFog: { value: new THREE.Vector3(env.fog_density ?? 0.004, env.fog_height_falloff ?? 0.02, env.fog_base_height ?? 0) },
+        uCapture: { value: 0 },
+        uClipMin: { value: new THREE.Vector3() },
+        uClipMax: { value: new THREE.Vector3() },
+        uCamFwd: { value: new THREE.Vector3(0, 0, -1) },
+        uFire: { value: this.fireLights },
+        uFireColor: { value: this.fireColors },
+        uFireCount: { value: 0 },
       },
     });
     this.marchMaterial?.dispose();
@@ -285,6 +331,8 @@ export class NearField implements NearFieldRenderer {
       : entities;
     const inst = buildInstances(withOverrides, this.runtimes);
     const grid = buildGrid(inst);
+    this.entityById = new Map(entities.map((e) => [e.id, e]));
+    this.rowById = new Map(inst.ids.map((id, i) => [id, i]));
     this.inst = inst;
     this.grid = grid;
     this.instTex?.dispose();
@@ -296,6 +344,106 @@ export class NearField implements NearFieldRenderer {
     u.uGrid.value = this.gridTex;
     u.uGridInfo.value.set(grid.originX, grid.originZ, grid.cell, inst.count);
     u.uGridDim.value.set(grid.dimX, grid.dimZ);
+  }
+
+  /**
+   * Overwrite the derived visual state of loaded entities in place (charring progress, flame flag, canopy shrinking
+   * while burning). Geometry parameters are clamped to the archetype's range; bounding data are not touched, so this
+   * may only shrink shapes (burning does). Uploads the instance texture once.
+   */
+  setDynamic(updates: Map<string, DynamicVisual>): void {
+    if (!this.inst || !this.instTex || !updates.size) return;
+    const data = this.inst.data;
+    let dirty = false;
+    for (const [id, v] of updates) {
+      const row = this.rowById.get(id);
+      const e = this.entityById.get(id);
+      if (row === undefined || !e) continue;
+      const rt = this.runtimes.get(e.geometry_id);
+      if (!rt) continue;
+      const o = row * INSTANCE_TEXELS * 4;
+      if (v.params) {
+        rt.compiled.paramNames.forEach((name, i) => {
+          const value = v.params![name];
+          if (value !== undefined) data[o + 12 + i] = Math.min(rt.paramMax[i], Math.max(rt.paramMin[i], value));
+        });
+      }
+      if (v.burning !== undefined) data[o + 17] = v.burning ? 1 : 0;
+      if (v.burnVisual !== undefined) data[o + 18] = v.burnVisual;
+      dirty = true;
+    }
+    if (dirty) this.instTex.needsUpdate = true;
+  }
+
+  /** Point lights of active fires (world position, intensity); at most MAX_FIRE_LIGHTS are used. */
+  setFireLights(lights: { x: number; y: number; z: number; intensity: number; color?: [number, number, number] }[]): void {
+    if (!this.marchMaterial) return;
+    const n = Math.min(MAX_FIRE_LIGHTS, lights.length);
+    for (let i = 0; i < n; i++) {
+      this.fireLights[i].set(lights[i].x, lights[i].y, lights[i].z, lights[i].intensity);
+      const c = lights[i].color ?? [1, 0.46, 0.14];
+      this.fireColors[i].set(c[0], c[1], c[2]);
+    }
+    this.marchMaterial.uniforms.uFireCount.value = n;
+  }
+
+  /** Signed distance from a world point to one loaded entity (CPU evaluation of its archetype), or +Inf. */
+  private entityDistance(e: WorldEntity, wx0: number, wy0: number, wz0: number): number {
+    const fn = this.cpuFns.get(e.geometry_id);
+    const rt = this.runtimes.get(e.geometry_id);
+    if (!fn || !rt) return Infinity;
+    const merged = { ...(e.geometry_params ?? {}), ...(this.overrides.get(e.id) ?? {}) } as Record<string, number>;
+    const pos = e.transform.position as number[];
+    const q = (e.transform.rotation ?? [0, 0, 0, 1]) as number[];
+    const s = e.transform.scale ?? 1;
+    const wx = wx0 - pos[0];
+    const wy = wy0 - pos[1];
+    const wz = wz0 - pos[2];
+    const [x, y, z, w] = [-q[0], -q[1], -q[2], q[3]];
+    const ax = y * wz - z * wy + w * wx;
+    const ay = z * wx - x * wz + w * wy;
+    const az = x * wy - y * wx + w * wz;
+    const lx = (wx + 2 * (y * az - z * ay)) / s;
+    const ly = (wy + 2 * (z * ax - x * az)) / s;
+    const lz = (wz + 2 * (x * ay - y * ax)) / s;
+    return fn([lx, ly, lz], merged).d * s * rt.compiled.stepScale;
+  }
+
+  /**
+   * Push a vertical body (feet at feetY, given radius and height) out of every solid entity it overlaps, sampling the
+   * same SDFs the shader renders at three heights. Returns the corrected XZ position.
+   */
+  collide(x: number, feetY: number, z: number, radius: number, height: number): [number, number] {
+    if (!this.inst) return [x, z];
+    const sp = this.inst.spheres;
+    let px = x;
+    let pz = z;
+    const samples = [0.35, height * 0.55, height - 0.15];
+    for (let iter = 0; iter < 2; iter++) {
+      for (let i = 0; i < this.inst.count; i++) {
+        const r = sp[i * 4 + 3];
+        const dxs = px - sp[i * 4];
+        const dzs = pz - sp[i * 4 + 2];
+        if (dxs * dxs + dzs * dzs > (r + radius + 0.2) ** 2) continue;
+        if (feetY > sp[i * 4 + 1] + r || feetY + height < sp[i * 4 + 1] - r) continue;
+        const e = this.entityById.get(this.inst.ids[i]);
+        if (!e || e.state?.condition === "removed") continue;
+        for (const h of samples) {
+          const y = feetY + h;
+          const d = this.entityDistance(e, px, y, pz);
+          if (d >= radius) continue;
+          const g = 0.05;
+          const gx = this.entityDistance(e, px + g, y, pz) - this.entityDistance(e, px - g, y, pz);
+          const gz = this.entityDistance(e, px, y, pz + g) - this.entityDistance(e, px, y, pz - g);
+          const gl = Math.hypot(gx, gz);
+          if (gl < 1e-6) continue;
+          const push = radius - d;
+          px += (gx / gl) * push;
+          pz += (gz / gl) * push;
+        }
+      }
+    }
+    return [px, pz];
   }
 
   /** Inspector preview: change geometry parameters of one entity locally. Not persisted, not authoritative. */
@@ -345,16 +493,21 @@ export class NearField implements NearFieldRenderer {
 
   // ---------------------------------------------------------------- frame
 
-  /** Pass A: ray march into the near-field target using the given scene camera. */
-  renderToTarget(camera: THREE.PerspectiveCamera): void {
-    if (!this.marchMaterial) return;
-    const u = this.marchMaterial.uniforms;
+  private setCameraUniforms(camera: THREE.PerspectiveCamera): void {
+    const u = this.marchMaterial!.uniforms;
     camera.updateMatrixWorld();
     u.uCamWorld.value.copy(camera.matrixWorld);
     u.uProjInv.value.copy(camera.projectionMatrixInverse);
     this.viewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     u.uViewProj.value.copy(this.viewProj);
     u.uCamPos.value.setFromMatrixPosition(camera.matrixWorld);
+  }
+
+  /** Pass A: ray march into the near-field target using the given scene camera. */
+  renderToTarget(camera: THREE.PerspectiveCamera): void {
+    if (!this.marchMaterial) return;
+    const u = this.marchMaterial.uniforms;
+    this.setCameraUniforms(camera);
     u.uTime.value = (performance.now() - this.startTime) / 1000;
     this.timer.poll();
     this.timer.begin();
@@ -362,6 +515,95 @@ export class NearField implements NearFieldRenderer {
     this.renderer.render(this.marchScene, this.marchCamera);
     this.renderer.setRenderTarget(null);
     this.timer.end();
+  }
+
+  /**
+   * Render one reconstruction view of the scene clipped to [clipMin, clipMax] with the same program as the near
+   * field (capture mode: no fog, full step budget, animation time 0). Rendered at `supersample`× and box-filtered,
+   * so edge pixels carry fractional coverage. Color is display-referred (identical to what the composite pass
+   * writes to the canvas); depth is linear along the camera's forward axis, averaged over the covered samples.
+   */
+  captureView(camera: THREE.PerspectiveCamera, size: number, clipMin: THREE.Vector3, clipMax: THREE.Vector3, supersample = 2): CapturedView {
+    if (!this.marchMaterial) throw new Error("no world loaded");
+    const S = size * supersample;
+    const target = new THREE.WebGLRenderTarget(S, S, {
+      type: THREE.FloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: true,
+    });
+    const u = this.marchMaterial.uniforms;
+    const saved = { view: u.uDebugView.value, steps: u.uMaxSteps.value, shadows: u.uShadowSteps.value, far: u.uFar.value };
+    u.uCapture.value = 1;
+    u.uDebugView.value = 0;
+    u.uMaxSteps.value = 256;
+    u.uShadowSteps.value = 48;
+    u.uFar.value = camera.far;
+    u.uTime.value = 0;
+    u.uClipMin.value.copy(clipMin);
+    u.uClipMax.value.copy(clipMax);
+    this.setCameraUniforms(camera);
+    u.uCamFwd.value.set(0, 0, -1).transformDirection(camera.matrixWorld);
+    const raw = new Float32Array(S * S * 4);
+    try {
+      this.renderer.setRenderTarget(target);
+      this.renderer.render(this.marchScene, this.marchCamera);
+      this.renderer.readRenderTargetPixels(target, 0, 0, S, S, raw);
+    } finally {
+      this.renderer.setRenderTarget(null);
+      u.uCapture.value = 0;
+      u.uDebugView.value = saved.view;
+      u.uMaxSteps.value = saved.steps;
+      u.uShadowSteps.value = saved.shadows;
+      u.uFar.value = saved.far;
+      target.dispose();
+    }
+    const rgba = new Uint8Array(size * size * 4);
+    const depth = new Float32Array(size * size);
+    const n = supersample * supersample;
+    let hits = 0;
+    let unobserved = 0;
+    for (let oy = 0; oy < size; oy++) {
+      const glRow0 = (size - 1 - oy) * supersample; // GL rows start at the bottom
+      for (let ox = 0; ox < size; ox++) {
+        let r = 0, g = 0, b = 0, d = 0, k = 0;
+        let cut = false;
+        for (let sy = 0; sy < supersample; sy++) {
+          for (let sx = 0; sx < supersample; sx++) {
+            const i = ((glRow0 + sy) * S + ox * supersample + sx) * 4;
+            if (raw[i + 3] > 0) {
+              r += raw[i]; g += raw[i + 1]; b += raw[i + 2]; d += raw[i + 3]; k++;
+            } else if (raw[i + 3] < 0) cut = true;
+          }
+        }
+        const o = oy * size + ox;
+        if (cut) {
+          depth[o] = -1; // any unobserved sample makes the whole pixel unobserved
+          unobserved++;
+        } else if (k > 0) {
+          rgba[o * 4] = Math.round(Math.min(1, r / k) * 255);
+          rgba[o * 4 + 1] = Math.round(Math.min(1, g / k) * 255);
+          rgba[o * 4 + 2] = Math.round(Math.min(1, b / k) * 255);
+          rgba[o * 4 + 3] = Math.round((k / n) * 255);
+          depth[o] = d / k;
+          hits++;
+        }
+      }
+    }
+    return { width: size, height: size, rgba, depth, hitFraction: hits / (size * size), unobservedFraction: unobserved / (size * size) };
+  }
+
+  /** Highest point of any instance bounding sphere that overlaps the XZ rectangle (−Infinity if none). */
+  instanceTop(minX: number, maxX: number, minZ: number, maxZ: number): number {
+    let top = -Infinity;
+    if (!this.inst) return top;
+    const s = this.inst.spheres;
+    for (let i = 0; i < this.inst.count; i++) {
+      const x = s[i * 4], y = s[i * 4 + 1], z = s[i * 4 + 2], r = s[i * 4 + 3];
+      if (x + r >= minX && x - r <= maxX && z + r >= minZ && z - r <= maxZ) top = Math.max(top, y + r);
+    }
+    return top;
   }
 
   stats(): NearFieldStats {
@@ -449,6 +691,23 @@ export class NearField implements NearFieldRenderer {
       if (y < this.groundHeight(x, z) || (water !== null && y < water)) return true;
     }
     return false;
+  }
+
+  /** Emitted light of an archetype (brightest emissive material: color × strength), or null if it does not glow. */
+  archetypeGlow(id: string): [number, number, number] | null {
+    const def = this.defs.get(id);
+    let best: [number, number, number] | null = null;
+    let lum = 0;
+    for (const m of def?.materials ?? []) {
+      const e = (m.emissive ?? [0, 0, 0]) as number[];
+      const s = m.emissive_strength ?? 0;
+      const l = Math.max(e[0], e[1], e[2]) * s;
+      if (l > lum) {
+        lum = l;
+        best = [e[0] * s, e[1] * s, e[2] * s];
+      }
+    }
+    return lum > 0.05 ? best : null;
   }
 
   archetypeDef(id: string): GeometryDefinition | undefined {

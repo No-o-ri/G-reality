@@ -6,6 +6,8 @@
  * Serves the production build, opens it in the installed Chrome (or Edge) with the offline sample world,
  * and for several camera poses / debug views records: shader compile errors, console errors, the
  * GPU↔CPU terrain parity, frame statistics and a screenshot. Exits non-zero if a check fails.
+ * --gaussians=RX,RZ adds the Chunk 3 diagnostic shots (SDF / Gaussian-only / split) framing that region; they require
+ * an optimized asset for it (scripts/chunk3_reconstruct.py) and fail unless it loads, verifies and renders.
  * Screenshots and report.json are written to apps/web/visual-out/ (git-ignored).
  */
 import { spawn } from "node:child_process";
@@ -36,7 +38,8 @@ if (!found) {
   process.exit(2);
 }
 
-// name, pose "x,y,z,yaw,pitch" (null = spawn pose on the ground), debug view, quality
+// name, pose "x,y,z,yaw,pitch" (null = spawn pose on the ground, "region:rx,rz" = frame that region), debug view,
+// quality, Gaussian diagnostic mode
 const SHOTS = [
   ["01-spawn-final", null, "final", "high"],
   ["02-overview-final", "-150,55,60,-0.9,-0.38", "final", "high"],
@@ -48,6 +51,12 @@ const SHOTS = [
   ["08-lake-final", "-95,9,10,-1.45,-0.05", "final", "ultra"],
   ["09-spawn-performance", null, "final", "performance"],
 ];
+const gaussianRegion = process.argv.find((a) => a.startsWith("--gaussians="))?.slice(12);
+if (gaussianRegion) {
+  for (const [n, mode] of [["10-region-sdf", "sdf"], ["11-region-gaussian", "gaussian"], ["12-region-split", "split"]]) {
+    SHOTS.push([n, `region:${gaussianRegion}`, "final", "high", mode]);
+  }
+}
 
 const server = spawn(process.execPath, [join(root, "node_modules/vite/bin/vite.js"), "preview", "--port", String(PORT), "--strictPort"], {
   cwd: root,
@@ -78,16 +87,20 @@ const browser = await chromium.launch({
 });
 try {
   const context = await browser.newContext({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 1 });
-  for (const [shotName, pose, view, quality] of SHOTS) {
+  for (const [shotName, pose, view, quality, gaussians = "sdf"] of SHOTS) {
     if (only && !shotName.startsWith(only)) continue;
     const name = outPrefix + shotName;
     const page = await context.newPage();
     const consoleErrors = [];
     page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text().slice(0, 500)));
     page.on("pageerror", (e) => consoleErrors.push(String(e).slice(0, 500)));
-    const query = `${extraQuery}&q=${quality}&debug=${view}${pose ? `&pose=${pose}` : ""}`;
+    const where = !pose ? "" : pose.startsWith("region:") ? `&viewRegion=${pose.slice(7)}` : `&pose=${pose}`;
+    const query = `${extraQuery}&q=${quality}&debug=${view}&gaussians=${gaussians}${where}`;
     await page.goto(`${BASE}/?${query}${hash ? `#${hash}` : ""}`);
     await page.waitForFunction(() => window.__greality && (window.__greality.ready || window.__greality.error), null, { timeout: 60_000 });
+    if (pose?.startsWith("region:")) {
+      await page.waitForFunction(() => window.__greality.status().gaussianAssets.some((a) => a.state !== "loading"), null, { timeout: 30_000 }).catch(() => {});
+    }
     // let the frame-time window fill with steady-state frames
     await page.waitForFunction(() => window.__greality.engine && window.__greality.engine.frameCount() > 150, null, { timeout: 60_000 }).catch(() => {});
     await page.waitForTimeout(1500);
@@ -102,6 +115,7 @@ try {
         shaderChars: s.shaderChars, terrainParityM: s.terrainParityM, gpuRenderer: s.gpuRenderer,
         position: s.position, regionsLoaded: s.regionsLoaded, frames: g.engine.frameCount(),
         worldId: s.worldId, worldRevision: s.worldRevision, loadError: s.loadError,
+        gaussianMode: s.gaussianMode, gaussianSplats: s.gaussianSplats, gaussianAssets: s.gaussianAssets,
       };
     });
     // image statistics from the canvas: reject blank / single-colour frames
@@ -133,6 +147,11 @@ try {
     if (status.compileErrors?.length) fail(`shader compile error: ${status.compileErrors[0].slice(0, 200)}`);
     if (consoleErrors.length) fail(`console error: ${consoleErrors[0]}`);
     if (!(status.instances > 0)) fail("no SDF instances");
+    if (pose?.startsWith("region:")) {
+      const active = (status.gaussianAssets ?? []).filter((a) => a.state === "active");
+      if (!active.length) fail(`no active Gaussian asset: ${JSON.stringify(status.gaussianAssets)}`);
+      if (gaussians !== "sdf" && !(status.gaussianSplats > 0)) fail("Gaussian mode without any loaded Gaussians");
+    }
     if (!(status.terrainParityM < 0.05)) fail(`terrain GPU/CPU mismatch ${status.terrainParityM} m`);
     if (status.gridOverflow > 0) fail(`grid overflow ${status.gridOverflow}`);
     if (!(stats.stdLuma > 6 && (view !== "final" || stats.distinctColors > 40))) fail(`image looks blank (std ${stats.stdLuma.toFixed(1)}, ${stats.distinctColors} colours)`);

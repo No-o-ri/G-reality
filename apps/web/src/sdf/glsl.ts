@@ -89,6 +89,28 @@ float sdBox(vec3 p, vec3 b) {
   return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 float sdRoundBox(vec3 p, vec3 b, float r) { return sdBox(p, b) - r; }
+// Tube along the quadratic Bezier a -> c (control b), radius ra -> rb, as 8 tapered segments.
+float sdCurveTube(vec3 p, vec3 a, vec3 b, vec3 c, float ra, float rb) {
+  float d = 1e9;
+  vec3 prev = a;
+  for (int i = 1; i <= 8; i++) {
+    float t = float(i) / 8.0;
+    vec3 q = mix(mix(a, b, t), mix(b, c, t), t);
+    vec3 pa = p - prev;
+    vec3 ba = q - prev;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
+    float r = mix(ra, rb, (float(i - 1) + h) / 8.0);
+    d = min(d, length(pa - ba * h) - r);
+    prev = q;
+  }
+  return d;
+}
+// Superellipsoid (approximate distance: implicit field scaled by the smallest radius).
+float sdSuperquadric(vec3 p, vec3 r, float e) {
+  vec3 q = abs(p) / r;
+  float f = pow(pow(q.x, e) + pow(q.y, e) + pow(q.z, e), 1.0 / e);
+  return (f - 1.0) * min(r.x, min(r.y, r.z));
+}
 float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
   vec3 pa = p - a;
   vec3 ba = b - a;
@@ -136,6 +158,19 @@ vec3 quatRotateInv(vec4 q, vec3 v) { return quatRotate(vec4(-q.xyz, q.w), v); }
 // Limited repetition: cell index clamped to [-count, count]; count 0 leaves that axis untouched.
 vec3 opRepeat(vec3 p, vec3 period, vec3 count) {
   return p - period * clamp(round(p / period), -count, count);
+}
+// Polar repetition about +Y, folding into the sector centered on +X.
+vec3 opRadial(vec3 p, float count, float offset) {
+  float n = floor(count + 0.5);
+  float sector = 6.283185307179586 / n;
+  float a = atan(p.z, p.x) + offset;
+  a = mod(a + sector * 0.5, sector) - sector * 0.5;
+  p.xz = length(p.xz) * vec2(cos(a), sin(a));
+  return p;
+}
+vec3 opTaper(vec3 p, float rate) {
+  p.xz /= max(0.05, 1.0 + rate * p.y);
+  return p;
 }
 // Twist about +Y by rate radians per meter.
 vec3 opTwist(vec3 p, float rate) {

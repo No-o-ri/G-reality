@@ -51,7 +51,8 @@ def test_recorded_world_response_builds_a_valid_spec():
     spec = build_spec(draft, "prompt", seed=7)
     assert stub.calls == [WORLD_MODELS[0]]
     assert spec.terrain.water_level is not None
-    assert {f.geometry_id for f in spec.features} >= {"tree.conifer", "building.house"}
+    families = {f.geometry_id.rsplit(".g", 1)[0] for f in spec.features}
+    assert families >= {"tree.conifer", "building.house"}  # generated variants of the requested families
     assert any("river" in n for n in spec.interpretation_notes)
     assert 0.0 <= spec.environment.fog_density <= 0.2
 

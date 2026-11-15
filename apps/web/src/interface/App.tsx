@@ -3,6 +3,11 @@ import type { GeometryDefinition, WorldEntity } from "@contracts";
 import { ApiFailure, Companion, MIN_RENDERABLE_GENERATOR_VERSION, loadOfflineSample, readPairing, type WorldSummary } from "../app/api";
 import { Engine, type EngineStatus } from "../app/Engine";
 import { DEBUG_VIEWS, type DebugView, type QualityName } from "../rendering/hybrid/types";
+import { GAUSSIAN_MODES, type GaussianMode } from "../rendering/farfield/GaussianDiagnostic";
+import { Gameplay, type InteractionPrompt } from "../app/Gameplay";
+import { Landing, type GenerationError, type GenerationProgress } from "./Landing";
+import { Hud, type Toast } from "./Hud";
+import * as THREE from "three";
 
 type Backend =
   | { state: "checking" }
@@ -43,6 +48,48 @@ export function App() {
   const [previews, setPreviews] = useState<Record<string, Record<string, number>>>({});
   const [notes, setNotes] = useState<string[]>([]);
   const [legacy, setLegacy] = useState(0);
+  // player experience
+  const [screen, setScreen] = useState<"landing" | "playing">("landing");
+  const [devMode, setDevMode] = useState(false);
+  const [progress, setProgress] = useState<GenerationProgress | null>(null);
+  const [genError, setGenError] = useState<GenerationError | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [interaction, setPromptState] = useState<InteractionPrompt | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const gameplayRef = useRef<Gameplay | null>(null);
+  const toastId = useRef(0);
+
+  const toast = useCallback((message: string, tone: Toast["tone"] = "info") => {
+    const id = ++toastId.current;
+    setToasts((t) => [...t.slice(-3), { id, message, tone }]);
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), tone === "error" ? 6000 : 4000);
+  }, []);
+
+  const startGameplay = useCallback((live: boolean) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    gameplayRef.current?.stop();
+    engine.attract = null;
+    const g = new Gameplay(engine, live ? companion : null, { toast });
+    engine.onFrame = () => g.frame();
+    g.start();
+    gameplayRef.current = g;
+    setScreen("playing");
+  }, [companion, toast]);
+
+  const showLanding = useCallback(() => {
+    const engine = engineRef.current;
+    gameplayRef.current?.stop();
+    gameplayRef.current = null;
+    if (engine) {
+      engine.onFrame = null;
+      engine.setFireSources([]);
+      const p = engine.player.position;
+      engine.attract = new THREE.Vector3(p.x, engine.near.groundHeight(p.x, p.z), p.z);
+    }
+    document.exitPointerLock?.();
+    setScreen("landing");
+  }, []);
 
   const openOffline = useCallback(async () => {
     const engine = engineRef.current;
@@ -58,8 +105,10 @@ export function App() {
       setNotes((sample.world.spec.interpretation_notes ?? []) as string[]);
       setFog(null);
       setHour(null);
+      return true;
     } catch (e) {
       setError((e as Error).message);
+      return false;
     } finally {
       setBusy(null);
     }
@@ -80,8 +129,10 @@ export function App() {
         setNotes((world.spec.interpretation_notes ?? []) as string[]);
         setFog(null);
         setHour(null);
+        return true;
       } catch (e) {
         setError((e as Error).message);
+        return false;
       } finally {
         setBusy(null);
       }
@@ -130,12 +181,36 @@ export function App() {
     if (q && QUALITIES.includes(q)) engine.setQuality(q);
     const view = params.get("debug") as DebugView | null;
     if (view && DEBUG_VIEWS.includes(view)) engine.setDebugView(view);
+    const gmode = params.get("gaussians") as GaussianMode | null;
+    if (gmode && GAUSSIAN_MODES.includes(gmode)) engine.setGaussianMode(gmode);
 
+    const direct = ["sample", "world", "pose", "viewRegion"].some((k) => params.has(k));
+    if (params.get("dev") === "1" || direct) {
+      engine.setDevMode(true);
+      setDevMode(true);
+    }
     (async () => {
+      if (!direct) {
+        // player start: landing page over a live backdrop of the offline sample
+        void refreshBackend();
+        await openOffline();
+        const p = engine.player.position;
+        engine.attract = new THREE.Vector3(p.x + 60, engine.near.groundHeight(p.x + 60, p.z), p.z);
+        setScreen("landing");
+        hook.ready = true;
+        return;
+      }
       const list = params.get("sample") === "1" ? null : await refreshBackend();
       const wanted = params.get("world");
-      if (list && (wanted || list.length)) await openLive(wanted ?? list[0].world_id);
-      else await openOffline();
+      if (list && (wanted || list.length)) {
+        await openLive(wanted ?? list[0].world_id);
+        startGameplay(true);
+      } else {
+        await openOffline();
+        startGameplay(false);
+      }
+      const region = params.get("viewRegion")?.split(",").map(Number);
+      if (region && region.length === 2 && region.every(Number.isInteger)) engine.viewAsset({ rx: region[0], rz: region[1] });
       const pose = params.get("pose")?.split(",").map(Number);
       if (pose && pose.length >= 5 && pose.every(Number.isFinite)) {
         engine.player.flying = true;
@@ -150,6 +225,15 @@ export function App() {
     });
 
     const onKey = (e: KeyboardEvent) => {
+      const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
+      if (e.code === "KeyE" && !typing) void gameplayRef.current?.interact();
+      if (e.code === "Backquote" && !typing) {
+        setDevMode((v) => {
+          engine.setDevMode(!v);
+          return !v;
+        });
+      }
+      if (!engine.devMode) return;
       if (e.code === "F3") {
         e.preventDefault();
         setShowDiag((v) => !v);
@@ -158,6 +242,10 @@ export function App() {
         e.preventDefault();
         setShowPanel((v) => !v);
       }
+      if (e.code === "KeyG" && !(e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement)) {
+        const current = engine.status().gaussianMode;
+        engine.setGaussianMode(GAUSSIAN_MODES[(GAUSSIAN_MODES.indexOf(current) + 1) % GAUSSIAN_MODES.length]);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => {
@@ -165,7 +253,60 @@ export function App() {
       engine.dispose();
       engineRef.current = null;
     };
-  }, [openLive, openOffline, refreshBackend]);
+  }, [openLive, openOffline, refreshBackend, startGameplay]);
+
+  // UI-only world generation: Gemini (or the offline interpreter on request), then load and enter the world
+  const generate = async (text: string, offline: boolean) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    setGenError(null);
+    const startedAt = Date.now();
+    setProgress({ stage: offline ? "Interpreting your description (offline keyword interpreter)…" : "Designing your world with Gemini…", startedAt });
+    try {
+      const world = await companion.createWorld(text, offline);
+      setProgress({ stage: "Generating terrain, vegetation and structures…", startedAt });
+      await refreshBackend();
+      const ok = await openLive(world.world_id);
+      if (!ok) throw new Error("The world was created but could not be loaded. Open it from “Your worlds”.");
+      setProgress(null);
+      startGameplay(true);
+      toast(`Welcome to ${world.name}. Click to look around.`);
+    } catch (e) {
+      setProgress(null);
+      const failure = e instanceof ApiFailure ? e : null;
+      const llm = failure ? failure.code.startsWith("interpreter_") : false;
+      setGenError({
+        message: llm
+          ? `Gemini could not design this world (${failure!.message}).`
+          : failure?.status === 0
+            ? "The G-reality server stopped responding. Make sure it is still running and try again."
+            : `World generation failed: ${(e as Error).message}`,
+        canUseOffline: llm || !offline,
+      });
+    }
+  };
+
+  const openSaved = async (worldId: string) => {
+    setGenError(null);
+    setProgress({ stage: "Loading the world from Neon…", startedAt: Date.now() });
+    const ok = await openLive(worldId);
+    setProgress(null);
+    if (ok) startGameplay(true);
+    else setGenError({ message: "That world could not be opened. It may have been created by an older version.", canUseOffline: false });
+  };
+
+  const openSampleWorld = async () => {
+    const ok = await openOffline();
+    if (ok) startGameplay(false);
+  };
+
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      setNow(Date.now());
+      setPromptState(gameplayRef.current?.prompt ?? null);
+    }, 100);
+    return () => window.clearInterval(t);
+  }, []);
 
   const createWorld = async () => {
     if (!prompt.trim()) return;
@@ -213,11 +354,22 @@ export function App() {
   return (
     <div className="app">
       <canvas ref={canvasRef} className="viewport" />
-      <div className="crosshair" />
+      {screen === "landing" && (
+        <Landing backend={backend} worlds={worlds} progress={progress} error={genError} now={now}
+          onGenerate={(text, offline) => void generate(text, offline)} onOpen={(id) => void openSaved(id)}
+          onSample={() => void openSampleWorld()} onRetryBackend={() => void refreshBackend()} />
+      )}
+      {screen === "playing" && status && (
+        <Hud worldName={engine?.world?.name ?? ""} live={source === "live"}
+          interpreter={(notes[0] ?? "").replace("interpreted by ", "") || null}
+          prompt={interaction} toasts={toasts} paused={!status.pointerLocked} locomotion={engine?.player.locomotion ?? ""}
+          onResume={() => engine?.player.lock()} onExit={showLanding} devMode={devMode}
+          onToggleDev={() => { engine?.setDevMode(!devMode); setDevMode(!devMode); }} />
+      )}
 
       {fatal && <div className="modal"><h2>Cannot start the renderer</h2><p>{fatal}</p></div>}
 
-      <div className="topbar">
+      {devMode && <div className="topbar">
         <span className="brand">G-reality</span>
         <span className={`chip ${backend.state}`}>
           {backend.state === "checking" && "companion: checking…"}
@@ -231,11 +383,14 @@ export function App() {
           {source === "none" && "no world"}
         </span>
         <span className="chip far">far field: {status?.farField ?? "…"}</span>
+        {status && status.gaussianMode !== "sdf" && (
+          <span className="chip gaussian">Gaussian diagnostic · {status.gaussianMode} · {status.gaussianSplats.toLocaleString()} Gaussians</span>
+        )}
         {busy && <span className="chip busy">{busy}</span>}
         {error && <span className="chip error" title={error}>{error}</span>}
-      </div>
+      </div>}
 
-      {showPanel && (
+      {devMode && showPanel && (
         <div className="panel left">
           <h3>World</h3>
           {backend.state === "connected" ? (
@@ -267,6 +422,27 @@ export function App() {
             <ul className="notes">{notes.map((n, i) => <li key={i}>{n}</li>)}</ul>
           )}
 
+          <h3>Generated geometry</h3>
+          {(engine?.world?.spec.archetypes ?? []).length === 0 && <div className="hint small">No world loaded.</div>}
+          {(engine?.world?.spec.archetypes ?? []).map((a) => {
+            const def = a as GeometryDefinition;
+            const constructed = def.id.startsWith("obj.");
+            return (
+              <details key={def.id} className="geometry">
+                <summary>
+                  {constructed ? "◆ " : ""}{def.id} · {countNodes(def.root)} nodes
+                  {Object.keys(def.parameters ?? {}).length ? ` · params ${Object.keys(def.parameters ?? {}).join(", ")}` : ""}
+                </summary>
+                <div className="hint small">
+                  {constructed ? "constructed by the language model from the geometry language" : "procedural generator (generator v4)"} ·
+                  ops {opsUsed(def.root)} · materials {(def.materials ?? []).map((m) => `${m.id}${(m.emissive_strength ?? 0) > 0 ? " (emissive)" : ""}`).join(", ")}
+                </div>
+                <pre className="ast">{JSON.stringify({ parameters: def.parameters, materials: def.materials, root: def.root }, null, 1)}</pre>
+                <button className="secondary" onClick={() => void navigator.clipboard?.writeText(JSON.stringify(def, null, 2))}>Copy JSON</button>
+              </details>
+            );
+          })}
+
           <h3>Rendering</h3>
           <label>Quality
             <select value={status?.quality ?? "high"} onChange={(e) => engine?.setQuality(e.target.value as QualityName)}>
@@ -288,15 +464,45 @@ export function App() {
           </label>
           <div className="hint small">Fog and time sliders are local previews of the render; the stored world is unchanged.</div>
 
+          <h3>Gaussian reconstruction (diagnostic)</h3>
+          <label>Display
+            <select value={status?.gaussianMode ?? "sdf"} onChange={(e) => engine?.setGaussianMode(e.target.value as GaussianMode)}>
+              <option value="sdf">SDF only (mathematical renderer)</option>
+              <option value="gaussian">Gaussian assets only</option>
+              <option value="split">Split: SDF left · Gaussian right</option>
+            </select>
+          </label>
+          {(status?.gaussianAssets ?? []).length === 0 ? (
+            <div className="hint small">No optimized asset for the loaded regions. Create one with
+              <code>.venv\Scripts\python scripts\chunk3_reconstruct.py</code></div>
+          ) : (
+            <table className="assets">
+              <tbody>
+                {status!.gaussianAssets.map((a) => (
+                  <tr key={a.assetId}>
+                    <td>({a.coord.rx},{a.coord.rz})</td>
+                    <td className={a.state}>{a.state}</td>
+                    <td>rev {a.assetRevision}{a.regionRevision !== null && a.regionRevision !== a.assetRevision ? ` ≠ region ${a.regionRevision}` : ""}</td>
+                    <td>{a.gaussians.toLocaleString()}</td>
+                    <td>{a.psnrHoldout === null ? "" : `${fmt(a.psnrHoldout, 1)} dB`}</td>
+                    <td><button className="secondary tiny" onClick={() => engine?.viewAsset(a.coord)}>view</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="hint small">Assets are optimized 3D Gaussians fitted to views of the SDF world (3dgs-optim-v1).
+            Shown only when built from the region's current revision. Combined hybrid rendering is Chunk 4. Key G cycles the display.</div>
+
           <h3>Controls</h3>
           <div className="hint small">
             Click the view to capture the mouse · WASD move · Shift sprint · Space jump · F fly (Space/C up/down) ·
-            click an object to pin it in the inspector · F3 diagnostics · Tab panels · Esc release mouse
+            click an object to pin it in the inspector · G Gaussian diagnostic · F3 diagnostics · Tab panels · Esc release mouse
           </div>
         </div>
       )}
 
-      {showPanel && inspected && def && (
+      {devMode && showPanel && inspected && def && (
         <div className="panel right">
           <h3>Inspector {pinned ? "(pinned)" : "(crosshair)"}</h3>
           <table>
@@ -329,7 +535,7 @@ export function App() {
         </div>
       )}
 
-      {showDiag && status && (
+      {devMode && showDiag && status && (
         <div className="diag">
           <div><b>{fmt(status.fps, 0)} fps</b> · frame {fmt(status.frameMs.avg)} ms (p50 {fmt(status.frameMs.p50)}, p95 {fmt(status.frameMs.p95)}, max {fmt(status.frameMs.max)})</div>
           <div>near-field SDF pass (GPU): {status.nearGpuMs === null ? "timer unavailable" : `${fmt(status.nearGpuMs, 2)} ms`}</div>
@@ -340,14 +546,25 @@ export function App() {
           <div>GPU↔CPU terrain max error: {status.terrainParityM === null ? "n/a" : `${(status.terrainParityM * 1000).toFixed(2)} mm`}</div>
           <div>regions loaded {status.regionsLoaded} · pending {status.regionsPending} · world rev {status.worldRevision ?? "–"} · region ({status.region.join(",")}) rev {status.regionRevision ?? "–"}</div>
           <div>camera {status.position.map((v) => v.toFixed(1)).join(", ")}{status.flying ? " · flying" : ""}</div>
-          <div>far field (Gaussian): {status.farField} · splats 0</div>
+          <div>far field (hybrid): {status.farField}</div>
+          <div>Gaussian diagnostic: {status.gaussianMode} · {status.gaussianAssets.filter((a) => a.state === "active").length} active asset(s) · {status.gaussianSplats.toLocaleString()} Gaussians
+            {status.gaussianAssets.some((a) => a.state === "stale") ? ` · ${status.gaussianAssets.filter((a) => a.state === "stale").length} stale (hidden)` : ""}</div>
           <div className="gpu">{status.gpuRenderer}</div>
           {status.loadError && <div className="err">region load: {status.loadError}</div>}
           {status.compileErrors.map((e, i) => <pre key={i} className="err">{e.slice(0, 600)}</pre>)}
         </div>
       )}
 
-      {status && !status.pointerLocked && source !== "none" && !busy && (
+      {status?.gaussianMode === "split" && (
+        <>
+          <div className="split-divider" />
+          <div className="split-label left">SDF · mathematical ray march</div>
+          <div className="split-label right">Gaussian reconstruction · 3dgs-optim-v1</div>
+        </>
+      )}
+      {status?.gaussianMode === "gaussian" && <div className="split-label right">Gaussian reconstruction only · 3dgs-optim-v1 (no SDF pass)</div>}
+
+      {devMode && status && !status.pointerLocked && source !== "none" && !busy && screen !== "playing" && (
         <div className="center-hint">Click to look around</div>
       )}
     </div>

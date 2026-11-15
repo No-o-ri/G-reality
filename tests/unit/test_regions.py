@@ -52,7 +52,7 @@ def test_generation_invariants(spec, rx, rz):
         x, y, z = entity.transform.position
         assert x0 <= x < x1 and z0 <= z < z1
         assert entity.region == coord == region_of(x, z)
-        assert re.fullmatch(rf"e:{rx}:{rz}:f\d+:(?:n\d+|g-?\d+_-?\d+)", entity.id)
+        assert re.fullmatch(rf"e:{rx}:{rz}:f\d+(?:v\d+)?:(?:n\d+|g-?\d+_-?\d+)", entity.id)
         assert y == pytest.approx(terrain_height(spec.terrain, 42, x, z), abs=1e-9)
 
 

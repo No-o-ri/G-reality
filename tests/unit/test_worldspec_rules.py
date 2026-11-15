@@ -40,8 +40,10 @@ def test_draft_numbers_clamped(high):
     assert spec.environment.humidity == int(high)
     assert spec.environment.wind == ((20, 20) if high else (-20, -20))
     assert spec.environment.temperature_c == (60 if high else -60)
-    assert spec.features[0].density_per_ha == (300 if high else 40)
-    assert spec.features[1].count == 40
+    # generator v4 splits a requested family over its generated variants; the total density is preserved
+    first = [f for f in spec.features if f.id.startswith("f0v")]
+    assert sum(f.density_per_ha for f in first) == pytest.approx(300 if high else 40)
+    assert sum(f.count for f in spec.features if f.id.startswith("f1v")) == 40
 
 
 @pytest.mark.parametrize("placement", ["lakeshore", "east_shore", "west_shore"])

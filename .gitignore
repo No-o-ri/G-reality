@@ -33,3 +33,10 @@ captures/
 .DS_Store
 *.log
 visual-out/
+
+graphify-out/
+
+# Chunk 3 pipeline working data (view bundles, training output, local asset store)
+data/
+apps/web/public/neural-offline/
+release/

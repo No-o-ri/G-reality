@@ -17,11 +17,21 @@ SEED = 20261114
 
 
 def village_spec(relief=40.0, ruggedness=0.25):
-    return build_spec(WorldDraft(title="t", relief_m=relief, ruggedness=ruggedness, has_lake=True, features=[
+    """A spec as stored by worlds created before generator v4: one feature per family, library archetypes."""
+    spec = build_spec(WorldDraft(title="t", relief_m=relief, ruggedness=ruggedness, has_lake=True, features=[
         FeatureDraft(archetype="tree.conifer", density_per_hectare=140),
         FeatureDraft(archetype="rock.boulder", density_per_hectare=30),
         FeatureDraft(archetype="building.house", count=8, placement="east_shore"),
     ]), "p", SEED)
+    lib = library()
+    legacy = []
+    for i, family in enumerate(("tree.conifer", "rock.boulder", "building.house")):
+        group = [f for f in spec.features if f.id.startswith(f"f{i}v")]
+        legacy.append(group[0].model_copy(update={
+            "id": f"f{i}", "geometry_id": family, "param_ranges": {},
+            "density_per_ha": sum(f.density_per_ha for f in group), "count": sum(f.count for f in group)}))
+    return spec.model_copy(update={"features": legacy, "archetypes": [lib[a] for a in
+                                                                       ("tree.conifer", "rock.boulder", "building.house")]})
 
 
 def all_entities(spec, version):

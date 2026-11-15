@@ -3,7 +3,7 @@
  * (`#companion=http://127.0.0.1:8765&token=…`, printed by the companion at start-up) and are kept in
  * sessionStorage for the tab only. No database credential ever reaches the browser.
  */
-import type { HealthReport, RegionCoord, RegionSnapshot, WorldState } from "@contracts";
+import type { HealthReport, MutationResult, PlayerState, RegionCoord, RegionSnapshot, WorldCommand, WorldState, WorldSync } from "@contracts";
 
 export interface WorldSummary {
   world_id: string;
@@ -110,8 +110,26 @@ export class Companion {
   getWorld(id: string): Promise<WorldState> {
     return this.request<WorldState>(`/v1/worlds/${encodeURIComponent(id)}`);
   }
-  createWorld(prompt: string): Promise<WorldState> {
-    return this.request<WorldState>("/v1/worlds", { method: "POST", body: JSON.stringify({ prompt }) }, 120_000);
+  /** offline=true uses the server's keyword interpreter instead of Gemini (labelled as such in the world). */
+  createWorld(prompt: string, offline = false): Promise<WorldState> {
+    return this.request<WorldState>("/v1/worlds", { method: "POST", body: JSON.stringify({ prompt, offline }) }, 300_000);
+  }
+  command(cmd: WorldCommand): Promise<MutationResult> {
+    return this.request<MutationResult>(`/v1/worlds/${encodeURIComponent(cmd.world_id)}/commands`, { method: "POST", body: JSON.stringify(cmd) }, 30_000);
+  }
+  sync(worldId: string, afterRevision: number): Promise<WorldSync> {
+    return this.request<WorldSync>(`/v1/worlds/${encodeURIComponent(worldId)}/sync?after_revision=${afterRevision}`, undefined, 15_000);
+  }
+  putPlayer(worldId: string, player: PlayerState): Promise<unknown> {
+    return this.request(`/v1/worlds/${encodeURIComponent(worldId)}/player`, { method: "PUT", body: JSON.stringify(player) }, 10_000);
+  }
+  /** Bytes of a published Gaussian asset (the caller verifies sha256 and region revision before use). */
+  async fetchAsset(assetId: string): Promise<ArrayBuffer> {
+    const response = await fetch(`${this.pairing.url}/v1/assets/${encodeURIComponent(assetId)}`, {
+      headers: this.pairing.token ? { Authorization: `Bearer ${this.pairing.token}` } : {},
+    });
+    if (!response.ok) throw new ApiFailure(response.status, `http_${response.status}`, `asset ${assetId}: ${response.statusText}`);
+    return response.arrayBuffer();
   }
   loadRegions(id: string, coords: RegionCoord[]): Promise<RegionSnapshot[]> {
     return this.request<RegionSnapshot[]>(`/v1/worlds/${encodeURIComponent(id)}/regions:batch`, {

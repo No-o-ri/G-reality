@@ -12,6 +12,7 @@
     "visual": "node scripts/visual-check.mjs"
   },
   "dependencies": {
+    "@sparkjsdev/spark": "2.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "three": "0.187.0"

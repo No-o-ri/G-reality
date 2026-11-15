@@ -11,9 +11,12 @@ ENV_FILES = (".env.local", ".env")
 
 
 def load_env_files(root: Path = ROOT) -> None:
-    """Populate os.environ from KEY=VALUE files without overriding variables that are already set."""
-    for name in ENV_FILES:
-        path = root / name
+    """Populate os.environ from KEY=VALUE files without overriding variables that are already set.
+
+    GREALITY_ENV_FILE (set by the release launcher) names the secrets file explicitly; otherwise the repository's
+    `.env.local` then `.env` are used."""
+    explicit = os.environ.get("GREALITY_ENV_FILE")
+    for path in ([Path(explicit)] if explicit else [root / name for name in ENV_FILES]):
         if not path.exists():
             continue
         for raw in path.read_text(encoding="utf-8").splitlines():
@@ -38,6 +41,8 @@ class Settings:
     bind_host: str
     port: int
     allowed_origins: tuple[str, ...]
+    web_dir: str = ""  # built frontend served at / (release mode)
+    gpu_worker: bool = False  # run queued neural far-field jobs in the background (needs WSL2 GPU venv)
 
     @property
     def has_database(self) -> bool:
@@ -57,4 +62,6 @@ def get_settings() -> Settings:
         bind_host=env("GREALITY_BIND_HOST", "127.0.0.1"),
         port=int(env("GREALITY_PORT", "8765")),
         allowed_origins=origins,
+        web_dir=env("GREALITY_WEB_DIR", ""),
+        gpu_worker=env("GREALITY_GPU_WORKER", "0") == "1",
     )

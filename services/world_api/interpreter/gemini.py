@@ -25,14 +25,54 @@ T = TypeVar("T", bound=BaseModel)
 WORLD_MODELS = ("gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash")
 COMMAND_MODELS = ("gemini-3.5-flash-lite", "gemini-3.6-flash")
 TIMEOUT_MS = 25_000
+WORLD_TIMEOUT_MS = 120_000  # geometry-writing answers are long
 
-WORLD_SYSTEM = """You design explorable 3D worlds for the G-reality engine.
-Return only JSON for the given schema. You choose terrain and climate parameters and which features to place.
-Available feature archetypes: tree.conifer, tree.broadleaf, rock.boulder, building.house, prop.campfire.
-Placements: everywhere, lowlands, highlands, lakeshore, east_shore, west_shore, near_spawn (shore placements need has_lake).
-Use density_per_hectare (5-200) for scattered features such as trees and rocks, and count (1-40) for discrete
-ones such as houses. Anything the user asks for that these parameters cannot express (rivers, animals, roads,
-castles, ...) must be listed in `unsupported` instead of being approximated silently."""
+WORLD_SYSTEM = """You design explorable 3D worlds for the G-reality engine. Return only JSON for the given schema.
+
+1. Terrain and climate: the numeric fields (relief, ruggedness, lake, colors, time_of_day_h, fog_density,
+   ambient_light: 0.03 very dark .. 0.25 daylight).
+2. OBJECTS: for every distinct kind of thing the user describes (plants, mushrooms, crystals, arches, rings, statues,
+   huts, ruins, trees, creatures-like sculptures, ...), CONSTRUCT its 3D shape in `objects` as a signed-distance
+   geometry tree. Do not approximate requested things with unrelated shapes. `features` (legacy trees/rocks/houses)
+   are optional background filler only.
+
+GEOMETRY LANGUAGE. `geometry_json` is a JSON string holding ONE node: {"op": ..., "params": {...}, "children": [...],
+"material": "<material id>"}. Local space: meters, origin at the object's base on the ground, +Y up. Keep each object
+under 60 nodes and depth under 11. Numbers may be replaced by {"ref": "<parameter name>"} to vary per entity.
+Primitives (no children):
+  sphere {radius}; ellipsoid {radii:[x,y,z]}; box {half:[x,y,z]}; round_box {half:[x,y,z], radius};
+  capsule {a:[x,y,z], b:[x,y,z], radius}   (a rounded straight segment: limbs, beams, struts);
+  curve_tube {a, b, c, radius_start, radius_end} (a tube swept along a curve from a to c bending towards control point b,
+    tapering: curved stems, arches, horns, tendrils, bent branches, ribs, drooping leaves);
+  superquadric {radii:[x,y,z], exponent} (exponent 2 = ellipsoid, 4-10 = rounded box / pillow / slab,
+    0.5-0.9 = pinched, faceted, crystal or star-like);
+  cylinder {half_height, radius} (centred, Y axis); cone {half_height, radius_bottom, radius_top} (centred, Y axis);
+  torus {major, minor} (ring in the XZ plane; rotate it to stand up); plane {normal:[x,y,z], offset}.
+Combine (2..8 children unless noted): union; intersect; subtract (exactly 2: first minus second);
+  smooth_union {k} (organic blending, k 0.05-2); smooth_subtract {k} (2); smooth_intersect {k} (2).
+Domain (exactly 1 child): translate {offset:[x,y,z]}; rotate {quat:[x,y,z,w]} (e.g. 90 deg about X:
+  [0.7071,0,0,0.7071]); scale {factor} (uniform); stretch {factor:[x,y,z]} (non-uniform);
+  repeat {period:[x,y,z], count:[x,y,z]} (copies along axes, count 0 = off); radial_repeat {count, offset}
+  (copies the child, placed at +X, around the Y axis: petals, gills, ribs, spokes, pillars in a ring);
+  mirror {axis: 0|1|2}; twist {rate} (radians per meter about Y); bend {rate} (-1..1, bends along X);
+  taper {rate} (-0.9..0.9, narrows or widens the cross-section with height); warp {amplitude, frequency, seed}
+  (organic irregularity).
+Fields (exactly 1 child): displace {amplitude, frequency, octaves 1-5, seed} (bumpy, eroded, crystalline-rough or soft
+  surfaces); round {radius}; shell {thickness} (hollow).
+Reuse: geometry_json may instead be {"defs": {"name": node, ...}, "root": node}; write {"use": "name"} anywhere to
+insert a definition (e.g. define one blade, leaf, petal, rib or crystal once and place it several times).
+Techniques: build curved forms from curve_tube (or several capsules, or a bent/tapered cylinder); caps and domes from a flattened
+ellipsoid minus a box or smooth-subtracted; rings from torus (stretch it for asymmetry); arches from a torus intersected
+with a half-space box or from a bent stretched box; crystals from stretched boxes/cones rotated and unioned, then
+twisted; radial structure with radial_repeat. Raise objects that float with translate (e.g. y = 6).
+Materials: every material id used in nodes must be listed in `materials`; glowing things get emissive_color and
+emissive_strength 1.5-6 (they emit light in the renderer). Put the material on primitives or on a parent node.
+PER-ENTITY VARIATION: declare 1-3 `parameters` (name, min, max) and use {"ref": name} in shape numbers (heights,
+radii, bend/twist rates, cap sizes) so every placed entity is geometrically different.
+Placement: density_per_hectare (2-150) for scattered objects or count (1-30) for large landmarks; size_m = radius of a
+sphere around the base that contains the object at scale 1; placements: everywhere, lowlands, highlands, lakeshore,
+east_shore, west_shore, near_spawn. flammable = true for plants and wooden things.
+List in `unsupported` only what truly cannot be built (moving creatures, liquids flowing, text)."""
 
 COMMAND_SYSTEM = """You translate a player's typed command in a 3D world into one structured intent.
 Return only JSON for the given schema. Actions: ignite (set on fire), extinguish (put a fire out),
@@ -53,13 +93,14 @@ class GeminiInterpreter:
 
         self._types = types
         self._client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=TIMEOUT_MS))
+        self._world_client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=WORLD_TIMEOUT_MS))
         self.preferred = model
         self.last_model: str | None = None  # which model produced the most recent answer
 
     def _models(self, defaults: tuple[str, ...]) -> list[str]:
         return list(dict.fromkeys(([self.preferred] if self.preferred else []) + list(defaults)))
 
-    def _generate(self, system: str, user: str, schema: type[T], temperature: float, models: list[str]) -> T:
+    def _generate(self, system: str, user: str, schema: type[T], temperature: float, models: list[str], client=None) -> T:
         from google.genai import errors
 
         config = self._types.GenerateContentConfig(
@@ -67,12 +108,12 @@ class GeminiInterpreter:
             response_mime_type="application/json",
             response_schema=schema,
             temperature=temperature,
-            max_output_tokens=2048,
+            max_output_tokens=12000,
         )
         last: InterpreterError | None = None
         for attempt, model in enumerate(models):
             try:
-                response = self._client.models.generate_content(model=model, contents=user, config=config)
+                response = (client or self._client).models.generate_content(model=model, contents=user, config=config)
             except ValidationError as exc:  # the SDK rejected our request locally (e.g. unsupported schema type)
                 raise InterpreterError(
                     "misconfigured", f"Gemini request could not be built ({exc.error_count()} schema problem(s)).") from None
@@ -106,7 +147,27 @@ class GeminiInterpreter:
         raise last
 
     def world(self, prompt: str) -> WorldDraft:
-        return self._generate(WORLD_SYSTEM, prompt[:2000], WorldDraft, 0.7, self._models(WORLD_MODELS))
+        draft = self._generate(WORLD_SYSTEM, prompt[:2000], WorldDraft, 0.7, self._models(WORLD_MODELS), self._world_client)
+        # validator-driven repair: send the exact validation errors back once and replace the objects that failed
+        from ..worldspec import object_geometry
+
+        errors = {}
+        for i, obj in enumerate(draft.objects[:8]):
+            try:
+                object_geometry(obj, i)
+            except ValueError as exc:
+                errors[i] = str(exc)[:400]
+        if errors:
+            listing = "\n".join(f"object {i} ({draft.objects[i].name}): {msg}" for i, msg in errors.items())
+            fix = (f"Original request: {prompt[:1500]}\n\nYour previous answer: {draft.model_dump_json()[:9000]}\n\n"
+                   f"These objects failed geometry validation:\n{listing}\n\nReturn the complete corrected JSON.")
+            try:
+                repaired = self._generate(WORLD_SYSTEM, fix, WorldDraft, 0.3, self._models(WORLD_MODELS), self._world_client)
+                if len(repaired.objects) >= len(draft.objects) - len(errors):
+                    draft = repaired
+            except InterpreterError:
+                pass  # keep the first answer; build_spec reports the rejected objects in the world's notes
+        return draft
 
     def command(self, text: str, context: CommandContext) -> IntentDraft:
         user = (
