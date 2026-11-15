@@ -1,3 +1,3 @@
 """G-reality local companion, installed with pip. Run with `py -m greality` (see `greality.__main__`)."""
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"

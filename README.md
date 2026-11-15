@@ -20,6 +20,7 @@ Built at SanD Hacks 2026.
 | Explore the sample world (walk, swim, look) | yes | yes |
 | Generate a new world from a description | — | yes: your PostgreSQL / Neon URL; Gemini key optional (keyword interpreter without one) |
 | World-specific interactions (E), fire simulation | — | yes |
+| Create new objects in the current world (T) | — | yes, with a Gemini key |
 | Persistent revisions, reopen saved worlds | — | yes (your database) |
 | Gaussian far field (experimental) | — | developer tools only; needs WSL2 + CUDA |
 
@@ -38,6 +39,9 @@ requires a per-launch pairing token.
 - **Generated interactions and simulation.** Each world gets its own interaction set (E key); the server applies
   them and runs the environmental simulation (fire spread with distance, wind and humidity; burn-out; catch-up on
   reopen) on one database clock.
+- **In-world creation.** Press **T**, describe something, and Gemini designs new geometry that the server validates,
+  places in front of the player and saves as a new world revision; existing objects are untouched and the creation is
+  still there after a reload or a companion restart.
 - **Gameplay.** Grounded player with gravity, jump, sprint, collision against the SDF geometry, wading and swimming.
 
 ### Experimental, not part of the default experience
