@@ -27,7 +27,7 @@ and start it:
 
 ```powershell
 py -3 -m venv "$env:LOCALAPPDATA\G-reality\env"
-& "$env:LOCALAPPDATA\G-reality\env\Scripts\python.exe" -m pip install --only-binary=:all: "https://github.com/No-o-ri/G-reality/releases/download/v1.0.2/greality-1.0.2-py3-none-any.whl"
+& "$env:LOCALAPPDATA\G-reality\env\Scripts\python.exe" -m pip install --only-binary=:all: "https://github.com/No-o-ri/G-reality/releases/download/v1.1.0/greality-1.1.0-py3-none-any.whl"
 & "$env:LOCALAPPDATA\G-reality\env\Scripts\python.exe" -m greality --shortcut
 & "$env:LOCALAPPDATA\G-reality\env\Scripts\python.exe" -m greality
 ```
@@ -37,7 +37,11 @@ py -3 -m venv "$env:LOCALAPPDATA\G-reality\env"
 - The launcher creates the database tables, starts the server on `127.0.0.1:8765` and opens your browser.
 - Later, start G-reality with the **G-reality** desktop shortcut (or the last command above).
 - While playing, press **T** to describe something new and add it to the current world (needs the Gemini key).
-- Updating from an earlier version: run the `pip install` command above again (same environment).
+- Updating from an earlier version: run the `pip install` command above again (same environment), then restart
+  G-reality. Database changes (e.g. the texture cache in v1.1.0) are applied automatically on start.
+- Photo textures (CC0, Poly Haven) are downloaded the first time a world uses them and cached in your database; until
+  they arrive (or without internet) surfaces are procedural. Press the backquote key for diagnostics
+  ("photo textures x/y").
 - Stop with Ctrl+C or by closing the window.
 
 About Smart App Control: Windows blocks script files downloaded from the internet, including the `G-reality.cmd`
@@ -49,7 +53,7 @@ Nothing needs to be unblocked and no security setting needs to change. Do not tu
 ### Alternative: ZIP with a double-click launcher (only without Smart App Control)
 
 If Smart App Control is **off** on your PC, you can download `G-reality-win64.zip` from the
-[v1.0.2 release](https://github.com/No-o-ri/G-reality/releases/tag/v1.0.2), unzip it and double-click
+[v1.1.0 release](https://github.com/No-o-ri/G-reality/releases/tag/v1.1.0), unzip it and double-click
 `G-reality.cmd`. It offers to install Python with winget, asks for the same settings, and opens the browser. With
 Smart App Control on, Windows blocks `G-reality.cmd` ("files of this type from the internet can be dangerous");
 use the pip route instead.
