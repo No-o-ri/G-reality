@@ -57,7 +57,7 @@ export function Hud({ worldName, live, interpreter, prompt, toasts, paused, loco
             <button className="secondary" onClick={onExit}>Back to the menu</button>
             <div className="controls">
               <div><b>WASD</b> move · <b>Shift</b> sprint · <b>Space</b> jump / swim up</div>
-              <div><b>Mouse</b> look · <b>E</b> interact · <b>Esc</b> release mouse</div>
+              <div><b>Mouse</b> look · <b>E</b> interact · <b>T</b> create · <b>Esc</b> release mouse</div>
             </div>
             <label className="dev-toggle">
               <input type="checkbox" checked={devMode} onChange={onToggleDev} /> Developer tools (diagnostics, fly camera, neural far field)

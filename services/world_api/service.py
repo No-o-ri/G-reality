@@ -51,16 +51,23 @@ from greality_contracts import (
     WorldSync,
 )
 
-from . import interactions, simulation
-from .actions import ACTIONS, ActionContext, distance, evaluate
+from . import geometry_bounds, interactions, simulation
+from .actions import ACTIONS, ActionContext, Effect, distance, evaluate
 from .interpreter import CommandContext, IntentDraft, Interpreter, InterpreterError, RulesInterpreter
 from .regions import GENERATOR_VERSION, generate_region, region_of, regions_touching, sphere_aabb
-from .worldspec import build_spec
+from .terrain import terrain_height
+from .worldspec import CreationDraft, object_behavior, object_geometry, build_spec
 
 PLAYER_ID = "p1"
 LIVE_JOB_STATES = ("queued", "awaiting_views", "training", "validating")
 SNAPSHOT_EVERY = 25
 MAX_REGIONS_PER_REQUEST = 49
+# In-world creation budgets. Every archetype becomes a function in the world's ray-march shader, so these bound both
+# the per-frame cost and the (asynchronous) shader recompile when a creation arrives.
+MAX_CREATION_OBJECTS = 4
+MAX_CREATED_ARCHETYPES = 24
+MAX_CREATED_NODES = 900
+CREATED_PREFIX = "cr"
 
 
 class NotFound(Exception):
@@ -228,17 +235,7 @@ class WorldService:
                 """INSERT INTO world_regions (world_id, rx, rz, generator_version)
                    SELECT %s, t.x, t.z, %s FROM unnest(%s::int[], %s::int[]) AS t(x, z)
                    ON CONFLICT DO NOTHING""", (world_id, w["generator_version"], xs, zs))
-            regions = {(r["rx"], r["rz"]): r for r in cur.execute(
-                f"SELECT * FROM world_regions WHERE world_id=%s AND {pairs} ORDER BY rx, rz FOR UPDATE",
-                (world_id, xs, zs)).fetchall()}
-            fresh = [c for c in coords if not regions[(c.rx, c.rz)]["materialized"]]
-            if fresh:
-                generated = [e for c in fresh
-                             for e in generate_region(world_id, spec, w["seed"], c, w["generator_version"])]
-                if generated:
-                    cur.executemany(_ENTITY_INSERT + " ON CONFLICT DO NOTHING", [_entity_params(e) for e in generated])
-                cur.execute(f"UPDATE world_regions SET materialized = true WHERE world_id=%s AND {pairs}",
-                            (world_id, [c.rx for c in fresh], [c.rz for c in fresh]))
+            regions = self._materialize(cur, world_id, spec, w["seed"], w["generator_version"], coords)
             by_region: dict[tuple[int, int], list[WorldEntity]] = {(c.rx, c.rz): [] for c in coords}
             for row in cur.execute(f"SELECT * FROM entities WHERE world_id=%s AND {pairs} ORDER BY entity_id",
                                    (world_id, xs, zs)).fetchall():
@@ -264,6 +261,26 @@ class WorldService:
                     pending_job=_job_from_row(jobs[key]) if key in jobs else None,
                 ))
         return out
+
+    @staticmethod
+    def _materialize(cur, world_id: str, spec: WorldSpec, seed: int, generator_version: int,
+                     coords: list[RegionCoord]) -> dict[tuple[int, int], dict]:
+        """Lock the regions' rows and commit the deterministic generator output of any not materialized yet."""
+        xs, zs = [c.rx for c in coords], [c.rz for c in coords]
+        pairs = "(rx, rz) IN (SELECT * FROM unnest(%s::int[], %s::int[]))"
+        regions = {(r["rx"], r["rz"]): r for r in cur.execute(
+            f"SELECT * FROM world_regions WHERE world_id=%s AND {pairs} ORDER BY rx, rz FOR UPDATE",
+            (world_id, xs, zs)).fetchall()}
+        fresh = [c for c in coords if not regions[(c.rx, c.rz)]["materialized"]]
+        if fresh:
+            generated = [e for c in fresh for e in generate_region(world_id, spec, seed, c, generator_version)]
+            if generated:
+                cur.executemany(_ENTITY_INSERT + " ON CONFLICT DO NOTHING", [_entity_params(e) for e in generated])
+            cur.execute(f"UPDATE world_regions SET materialized = true WHERE world_id=%s AND {pairs}",
+                        (world_id, [c.rx for c in fresh], [c.rz for c in fresh]))
+            for c in fresh:
+                regions[(c.rx, c.rz)]["materialized"] = True
+        return regions
 
     # ------------------------------------------------------------------ commands
 
@@ -324,6 +341,8 @@ class WorldService:
         )
         # the authoritative clock must be current before an ignition records its start tick
         self.advance_simulation(cmd.world_id)
+        if cmd.action == ActionType.build:
+            return self._create(cmd, nearby, context)
         if cmd.action is not None:  # structured interaction (E key): no language interpretation
             draft, interpreter_kind, interpreter_note = (
                 IntentDraft(action=cmd.action.value, target_kind=None, confidence=1.0), "direct", None)
@@ -339,6 +358,127 @@ class WorldService:
             current = self._world_revision(cmd.world_id)
             return MutationResult(status="error", command_id=cmd.command_id, world_revision=current,
                                   message=f"The change could not be saved ({type(exc).__name__}); nothing was applied.")
+
+    # ------------------------------------------------------------------ in-world creation
+
+    def _create(self, cmd: WorldCommand, nearby: list[WorldEntity], context: CommandContext) -> MutationResult:
+        """Add new objects designed by the language model to an existing world (a world mutation, never a rebuild).
+
+        Phases: (1) read the world without locks and ask the interpreter for a CreationDraft (slow; no lock held);
+        (2) validate every object against the op table and the GPU budget, measure it, and lay the group out in front
+        of the player on the authoritative terrain; (3) under the world lock, append the new archetypes and behaviours
+        to the stored spec, write them to geometry_definitions, insert the entities as one `entity_built` revision and
+        store the result for idempotent retries. Existing entities and the generator inputs are never touched, so
+        nothing else in the world changes and nothing is regenerated on reload."""
+        intent = ParsedIntent(action=ActionType.build, interpreter="llm", confidence=1.0)
+        with self.pool.connection() as conn:
+            cur = conn.cursor(row_factory=dict_row)
+            w = cur.execute("SELECT name, seed, spec, generator_version FROM worlds WHERE world_id=%s",
+                            (cmd.world_id,)).fetchone()
+        spec = WorldSpec.model_validate(w["spec"])
+        used, used_nodes = _created_budget(spec)
+        if used >= MAX_CREATED_ARCHETYPES or used_nodes >= MAX_CREATED_NODES:
+            return self._reject_creation(cmd, intent, "insufficient_resources", (
+                f"This world already holds {used} created objects ({used_nodes} geometry nodes), the most the renderer "
+                f"keeps fast. Create in another world."))
+        px, py, pz = cmd.player_position
+        ground = terrain_height(spec.terrain, w["seed"], px, pz)
+        water = spec.terrain.water_level
+        context = context.model_copy(update={
+            "world_title": w["name"],
+            "terrain_summary": f"standing {max(0.0, py - ground):.0f} m above the ground at height {ground:.0f} m"
+                               + (f", water level {water:.0f} m" if water is not None else ""),
+        })
+        draft = self.interpreter.create(cmd.text, context)  # InterpreterError propagates (nothing written)
+        notes = list(getattr(self.interpreter, "last_notes", []) or [])
+        token = uuid.uuid4().hex[:8]
+        built: list[tuple] = []
+        problems: list[str] = []
+        for i, obj in enumerate(draft.objects[:MAX_CREATION_OBJECTS]):
+            try:
+                geom = object_geometry(obj, i, id_prefix=f"{CREATED_PREFIX}{token}")
+            except ValueError as exc:
+                problems.append(f"'{obj.name[:30]}': {str(exc)[:160]}")
+                continue
+            built.append((obj, geom, object_behavior(obj, geom, notes)))
+        if not built:
+            detail = "; ".join(problems) or "the language model returned no objects"
+            return self._reject_creation(cmd, intent, "invalid_state", f"Nothing could be built: {detail}.")
+        new_nodes = sum(_node_count(g.root) for _, g, _ in built)
+        if used + len(built) > MAX_CREATED_ARCHETYPES or used_nodes + new_nodes > MAX_CREATED_NODES:
+            return self._reject_creation(cmd, intent, "insufficient_resources", (
+                f"That would exceed this world's creation budget ({used_nodes + new_nodes} of {MAX_CREATED_NODES} "
+                f"geometry nodes). Try something simpler."))
+        entities = _lay_out(cmd, draft, built, spec, w["seed"], nearby, token)
+        return self._commit_creation(cmd, draft, built, entities, intent, notes, problems)
+
+    def _reject_creation(self, cmd: WorldCommand, intent: ParsedIntent, code: str, message: str) -> MutationResult:
+        result = MutationResult(status="rejected", command_id=cmd.command_id, world_revision=self._world_revision(cmd.world_id),
+                                message=message, failures=[PreconditionFailure(code=code, message=message)])
+        with self.pool.connection() as conn, conn.transaction():
+            if conn.execute("SELECT 1 FROM commands WHERE world_id=%s AND command_id=%s",
+                            (cmd.world_id, cmd.command_id)).fetchone() is None:
+                self._store_command(conn.cursor(row_factory=dict_row), cmd, intent, result)
+        return result
+
+    def _commit_creation(self, cmd: WorldCommand, draft: CreationDraft, built: list, entities: list[WorldEntity],
+                         intent: ParsedIntent, notes: list[str], problems: list[str]) -> MutationResult:
+        with self.pool.connection() as conn, conn.transaction():
+            cur = conn.cursor(row_factory=dict_row)
+            w = cur.execute("SELECT revision, seed, spec, generator_version, gameplay FROM worlds WHERE world_id=%s "
+                            "FOR UPDATE", (cmd.world_id,)).fetchone()
+            again = cur.execute("SELECT result FROM commands WHERE world_id=%s AND command_id=%s",
+                                (cmd.world_id, cmd.command_id)).fetchone()
+            if again:
+                return MutationResult.model_validate(again["result"])
+            spec = WorldSpec.model_validate(w["spec"])
+            used, used_nodes = _created_budget(spec)  # re-checked under the lock (concurrent creations)
+            if used + len(built) > MAX_CREATED_ARCHETYPES or \
+                    used_nodes + sum(_node_count(g.root) for _, g, _ in built) > MAX_CREATED_NODES:
+                message = "This world's creation budget was used up meanwhile; nothing was added."
+                result = MutationResult(status="rejected", command_id=cmd.command_id, world_revision=w["revision"],
+                                        message=message, failures=[PreconditionFailure(code="insufficient_resources", message=message)])
+                self._store_command(cur, cmd, intent, result)
+                return result
+            geoms = [g for _, g, _ in built]
+            behaviors = {g.id: b for _, g, b in built if b.interactions or b.vars}
+            spec = spec.model_copy(update={"archetypes": [*spec.archetypes, *geoms],
+                                           "behaviors": {**spec.behaviors, **behaviors}})
+            cur.execute("UPDATE worlds SET spec=%s WHERE world_id=%s",
+                        (Jsonb(spec.model_dump(mode="json")), cmd.world_id))
+            for g in geoms:
+                cur.execute("INSERT INTO geometry_definitions (world_id, geometry_id, version, definition) "
+                            "VALUES (%s,%s,%s,%s)", (cmd.world_id, g.id, g.version, Jsonb(g.model_dump(mode="json"))))
+            # the regions the new objects stand in must hold their generated content first (never generated later
+            # on top of the creation)
+            coords = list({(e.region.rx, e.region.rz): e.region for e in entities}.values())
+            cur.execute("""INSERT INTO world_regions (world_id, rx, rz, generator_version)
+                           SELECT %s, t.x, t.z, %s FROM unnest(%s::int[], %s::int[]) AS t(x, z) ON CONFLICT DO NOTHING""",
+                        (cmd.world_id, w["generator_version"], [c.rx for c in coords], [c.rz for c in coords]))
+            self._materialize(cur, cmd.world_id, spec, w["seed"], w["generator_version"], coords)
+            for e in entities:
+                e.created_revision = w["revision"] + 1
+            title = (draft.title or "creation")[:60]
+            effect = Effect(
+                type=EventType.entity_built, entities=entities,
+                payload={"request": cmd.text[:500], "title": title,
+                         "archetypes": [g.model_dump(mode="json") for g in geoms],
+                         "behaviors": {k: v.model_dump(mode="json") for k, v in behaviors.items()},
+                         "notes": (notes + [f"skipped {p}" for p in problems])[:12]},
+                message=f"Created {title}.")
+            gameplay = GameplayState.model_validate(w["gameplay"])
+            revision, events, changed, dirty, _ = self._persist_effects(
+                cur, cmd.world_id, [effect], w["revision"], gameplay.tick, "player", cmd.command_id, {})
+            cur.execute("UPDATE worlds SET revision=%s, updated_at=now() WHERE world_id=%s", (revision, cmd.world_id))
+            extra = f" ({len(problems)} part(s) could not be built)" if problems else ""
+            intent = intent.model_copy(update={"build_geometry_id": geoms[0].id})
+            result = MutationResult(
+                status="committed", command_id=cmd.command_id, world_revision=revision,
+                message=f"Created {title}: {len(entities)} object(s), "
+                        f"{sum(_node_count(g.root) for g in geoms)} geometry nodes{extra}.",
+                events=events, entities=list(changed.values()), dirty_regions=list(dirty.values()))
+            self._store_command(cur, cmd, intent, result)
+            return result
 
     def _world_revision(self, world_id: str) -> int:
         try:
@@ -820,3 +960,74 @@ def make_pool(database_url: str, max_size: int = 6) -> ConnectionPool:
                           kwargs={"prepare_threshold": None})  # no server-side prepares through the Neon pooler
     pool.open(wait=True, timeout=30)
     return pool
+
+
+def _node_count(node) -> int:
+    return 1 + sum(_node_count(c) for c in node.children)
+
+
+def _created_budget(spec: WorldSpec) -> tuple[int, int]:
+    """(archetypes created in-world so far, their geometry nodes)."""
+    made = [g for g in spec.archetypes if g.id.startswith(CREATED_PREFIX)]
+    return len(made), sum(_node_count(g.root) for g in made)
+
+
+def _lay_out(cmd: WorldCommand, draft: CreationDraft, built: list, spec: WorldSpec, seed: int,
+             nearby: list[WorldEntity], token: str) -> list[WorldEntity]:
+    """Place the created objects around an anchor on the ground in front of the player.
+
+    The anchor is far enough ahead that no object's footprint reaches the player; grounded objects that would overlap
+    existing ones push the group further away (a few tries). Each base sits on the lowest terrain under its footprint
+    (so it never floats above a slope) or on the water surface, plus its requested hover height; objects face the
+    player."""
+    px, py, pz = cmd.player_position
+    vx, _, vz = cmd.view_direction
+    n = math.hypot(vx, vz)
+    fx, fz = (vx / n, vz / n) if n > 1e-3 else (1.0, 0.0)
+    rx, rz = -fz, fx  # right = forward x up
+    face = math.atan2(-fx, -fz)  # turns local +Z towards the player
+    t = spec.terrain
+    items = []
+    for (obj, geom, behavior) in built:
+        scale = max(0.2, min(5.0, obj.scale or 1.0))
+        scale = min(scale, 199.0 / geom.bound_radius)  # entity bound radius limit of the contract
+        (x0, _, z0), (x1, _, z1) = geometry_bounds.bounds(
+            geom.root.model_dump(mode="json"), {k: v.model_dump() for k, v in geom.parameters.items()})
+        foot = max(abs(x0), abs(x1), abs(z0), abs(z1)) * scale
+        items.append((obj, geom, behavior, scale, foot, max(-80.0, min(80.0, obj.forward_m)),
+                      max(-80.0, min(80.0, obj.right_m))))
+    distance_m = max(min(draft.distance_m, 150.0), max(4.0 + foot - fwd for _, _, _, _, foot, fwd, _ in items))
+
+    def centres(d: float):
+        return [(px + fx * (d + fwd) + rx * right, pz + fz * (d + fwd) + rz * right) for *_, fwd, right in items]
+
+    alive = [e for e in nearby if e.state.condition.value != "removed"]
+    for _ in range(6):
+        clash = any(math.hypot(cx - e.transform.position[0], cz - e.transform.position[2])
+                    < foot + 0.5 * e.bound_radius
+                    for (cx, cz), (obj, *_r, foot, _f, _g) in zip(centres(distance_m), items) if obj.height_m < 1.0
+                    for e in alive)
+        if not clash:
+            break
+        distance_m += 4.0
+    out = []
+    for i, ((cx, cz), (obj, geom, behavior, scale, foot, _, _)) in enumerate(zip(centres(distance_m), items)):
+        r = foot * 0.6
+        base = min(terrain_height(t, seed, cx + dx, cz + dz) for dx, dz in ((0, 0), (r, 0), (-r, 0), (0, r), (0, -r)))
+        if t.water_level is not None:
+            base = max(base, t.water_level)
+        y = base + max(0.0, min(200.0, obj.height_m))
+        yaw = face + math.radians(obj.yaw_deg)
+        caps = ["flammable", "removable"] if obj.flammable else ["removable"]
+        params = {k: v.default for k, v in geom.parameters.items()}
+        out.append(WorldEntity(
+            id=f"c-{token}-{i}", world_id=cmd.world_id, kind=("".join(c if c.isalnum() else "_" for c in obj.kind.lower())
+                                                               .strip("_") or "object")[:32],
+            geometry_id=geom.id, geometry_params=params,
+            transform=Transform(position=(cx, y, cz), rotation=(0.0, math.sin(yaw / 2), 0.0, math.cos(yaw / 2)),
+                                scale=scale),
+            region=region_of(cx, cz), bound_radius=min(200.0, geom.bound_radius * scale), capabilities=caps,
+            state={"fuel": round(min(80.0, 15.0 + geom.bound_radius * 4.0), 1) if obj.flammable else 0.0,
+                   "blocks_path": geom.bound_radius > 2.0, "vars": behavior.vars},
+            revision=0, created_revision=0, origin="player"))
+    return out

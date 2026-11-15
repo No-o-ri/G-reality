@@ -128,8 +128,8 @@ export class Companion {
   createWorld(prompt: string, offline = false): Promise<WorldState> {
     return this.request<WorldState>("/v1/worlds", { method: "POST", body: JSON.stringify({ prompt, offline }) }, 300_000);
   }
-  command(cmd: WorldCommand): Promise<MutationResult> {
-    return this.request<MutationResult>(`/v1/worlds/${encodeURIComponent(cmd.world_id)}/commands`, { method: "POST", body: JSON.stringify(cmd) }, 30_000);
+  command(cmd: WorldCommand, timeoutMs = 30_000): Promise<MutationResult> {
+    return this.request<MutationResult>(`/v1/worlds/${encodeURIComponent(cmd.world_id)}/commands`, { method: "POST", body: JSON.stringify(cmd) }, timeoutMs);
   }
   sync(worldId: string, afterRevision: number): Promise<WorldSync> {
     return this.request<WorldSync>(`/v1/worlds/${encodeURIComponent(worldId)}/sync?after_revision=${afterRevision}`, undefined, 15_000);

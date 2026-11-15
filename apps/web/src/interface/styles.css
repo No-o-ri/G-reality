@@ -145,3 +145,16 @@ details.geometry { margin: 4px 0; }
 details.geometry summary { cursor: pointer; color: #cfe3f5; }
 pre.ast { max-height: 260px; overflow: auto; font-size: 10.5px; background: rgba(0,0,0,.35); padding: 6px; border-radius: 4px; white-space: pre; }
 .panel.left { max-height: calc(100vh - 60px); overflow-y: auto; }
+
+/* T panel: create objects in the current world */
+.create-panel { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding-top: 18vh;
+  background: rgba(5,8,12,.35); font-family: "Segoe UI", system-ui, sans-serif; }
+.create-card { width: min(640px, calc(100% - 32px)); background: rgba(10,14,20,.9); border: 1px solid rgba(160,200,240,.3);
+  border-radius: 14px; padding: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.5); color: #e8eef4; }
+.create-card h3 { margin: 0 0 10px; font-size: 16px; font-weight: 600; }
+.create-card textarea { width: 100%; box-sizing: border-box; background: transparent; border: 0; color: #f2f5f8; resize: none;
+  font-size: 17px; line-height: 1.45; outline: none; font-family: inherit; }
+.create-card .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
+.create-card button { cursor: pointer; border-radius: 9px; font-size: 14px; border: 0; padding: 9px 20px; font-weight: 650;
+  background: linear-gradient(180deg, #ffb35c, #f07a2a); color: #1b0d02; }
+.create-card button:disabled { opacity: .45; cursor: default; }

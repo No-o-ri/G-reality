@@ -147,6 +147,29 @@ float sdTorus(vec3 p, float major, float minor) {
   return length(q) - minor;
 }
 float sdPlane(vec3 p, vec3 n, float offset) { return dot(p, normalize(n)) - offset; }
+// Regular polyhedron, r = inradius: max over face normals (generalized distance function).
+// kind 0 tetrahedron, 1 cube, 2 octahedron, 3 dodecahedron, 4 icosahedron.
+float sdPolyhedron(vec3 p, int kind, float r) {
+  const float A = 0.5773502691896258;  // 1/sqrt(3)
+  const float B = 0.5257311121191336;  // 1/sqrt(1+phi^2)
+  const float C = 0.8506508083520399;  // phi/sqrt(1+phi^2)
+  const float D = 0.3568220897730899;  // (1/phi)/sqrt(3)
+  const float E = 0.9341723589627157;  // phi/sqrt(3)
+  if (kind == 0) {
+    return max(max(dot(p, vec3(A, A, A)), dot(p, vec3(-A, -A, A))), max(dot(p, vec3(A, -A, -A)), dot(p, vec3(-A, A, -A)))) - r;
+  }
+  vec3 q = abs(p);
+  if (kind == 1) return max(q.x, max(q.y, q.z)) - r;
+  if (kind == 2) return (q.x + q.y + q.z) * A - r;
+  if (kind == 3) {
+    return max(max(max(abs(dot(p, vec3(0.0, B, C))), abs(dot(p, vec3(0.0, -B, C)))), max(abs(dot(p, vec3(B, C, 0.0))), abs(dot(p, vec3(-B, C, 0.0))))),
+               max(abs(dot(p, vec3(C, 0.0, B))), abs(dot(p, vec3(-C, 0.0, B))))) - r;
+  }
+  float d = (q.x + q.y + q.z) * A;  // the four (+-1, +-1, +-1) normals
+  d = max(d, max(max(abs(dot(p, vec3(0.0, D, E))), abs(dot(p, vec3(0.0, -D, E)))), max(abs(dot(p, vec3(E, 0.0, D))), abs(dot(p, vec3(-E, 0.0, D))))));
+  d = max(d, max(abs(dot(p, vec3(D, E, 0.0))), abs(dot(p, vec3(-D, E, 0.0)))));
+  return d - r;
+}
 
 float opSmoothUnion(float a, float b, float k) {
   float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
@@ -176,6 +199,22 @@ vec3 opRadial(vec3 p, float count, float offset) {
   a = mod(a + sector * 0.5, sector) - sector * 0.5;
   p.xz = length(p.xz) * vec2(cos(a), sin(a));
   return p;
+}
+// Helical repetition about +Y: copy j is rotated by j * 2pi / count and raised by j * pitch / count; the copy nearest
+// in angle (and, among those, in height) is chosen and clamped to [0, copies - 1].
+vec3 opSpiral(vec3 p, float count, float pitch, float copies) {
+  float n = max(floor(count + 0.5), 1.0);
+  float total = max(floor(copies + 0.5), 1.0);
+  float sector = 6.283185307179586 / n;
+  float a = atan(p.z, p.x);
+  if (a < 0.0) a += 6.283185307179586;
+  float k = mod(floor(a / sector + 0.5), n);
+  float rise = pitch / n;
+  float j = rise > 1e-6 ? k + n * floor((p.y / rise - k) / n + 0.5) : k;
+  j = clamp(j, 0.0, total - 1.0);
+  float c = cos(j * sector);
+  float s = sin(j * sector);
+  return vec3(c * p.x + s * p.z, p.y - j * rise, -s * p.x + c * p.z);
 }
 vec3 opTaper(vec3 p, float rate) {
   p.xz /= max(0.05, 1.0 + rate * p.y);

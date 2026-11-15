@@ -9,7 +9,7 @@ import type { GeometryDefinition, GeometryNode, MaterialDefinition } from "@cont
 
 export const MAX_ARCHETYPE_PARAMS = 4;
 
-const STEP_SCALE: Record<string, number> = { superquadric: 0.6, curve_tube: 0.95, ellipsoid: 0.8, radial_repeat: 0.9, taper: 0.6, stretch: 1, twist: 0.6, bend: 0.6, warp: 0.7, displace: 0.7 };
+const STEP_SCALE: Record<string, number> = { spiral_repeat: 0.8, superquadric: 0.6, curve_tube: 0.95, ellipsoid: 0.8, radial_repeat: 0.9, taper: 0.6, stretch: 1, twist: 0.6, bend: 0.6, warp: 0.7, displace: 0.7 };
 
 export interface CompiledArchetype {
   id: string;
@@ -150,6 +150,8 @@ class ArchetypeBuilder {
         );
       case "torus":
         return this.leaf(`sdTorus(${p}, ${this.scalar(prm.major)}, ${this.scalar(prm.minor)})`, mat);
+      case "polyhedron":
+        return this.leaf(`sdPolyhedron(${p}, ${this.int(prm.kind, 0, 4)}, ${this.scalar(prm.radius)})`, mat);
       case "plane": {
         const n = prm.normal;
         if (Array.isArray(n) && n.every((c) => typeof c === "number") && Math.hypot(...(n as number[])) < 1e-6) {
@@ -213,6 +215,9 @@ class ArchetypeBuilder {
       }
       case "radial_repeat":
         return this.domain(node, p, mat, `opRadial(${p}, ${this.scalar(prm.count)}, ${this.scalar(prm.offset)})`);
+      case "spiral_repeat":
+        return this.domain(node, p, mat,
+          `opSpiral(${p}, ${this.scalar(prm.count)}, ${this.scalar(prm.pitch)}, ${this.scalar(prm.copies)})`);
       case "taper":
         return this.domain(node, p, mat, `opTaper(${p}, ${this.scalar(prm.rate)})`);
       case "repeat":

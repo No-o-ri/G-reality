@@ -57,6 +57,10 @@ export function App() {
   const [genError, setGenError] = useState<GenerationError | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [interaction, setPromptState] = useState<InteractionPrompt | null>(null);
+  // T panel: create objects in the current world
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createText, setCreateText] = useState("");
   const [now, setNow] = useState(Date.now());
   const gameplayRef = useRef<Gameplay | null>(null);
   const toastId = useRef(0);
@@ -231,6 +235,14 @@ export function App() {
       const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
       if (e.code === "KeyE" && !typing) void gameplayRef.current?.interact();
       if (e.code === "KeyR" && !typing) gameplayRef.current?.cycle();
+      if (e.code === "KeyT" && !typing && gameplayRef.current) {
+        e.preventDefault();
+        if (!gameplayRef.current.live) toast("World creation requires the Windows companion.", "error");
+        else {
+          document.exitPointerLock?.();
+          setCreateOpen(true);
+        }
+      }
       if (e.code === "Backquote" && !typing) {
         setDevMode((v) => {
           engine.setDevMode(!v);
@@ -301,6 +313,35 @@ export function App() {
     else setGenError({ message: "That world could not be opened. It may have been created by an older version.", canUseOffline: false });
   };
 
+  // Create objects in the current world (persisted by the server), then reopen the world to compile the new
+  // geometry, keeping the player where they stood and looked.
+  const runCreate = async () => {
+    const g = gameplayRef.current;
+    const engine = engineRef.current;
+    const text = createText.trim();
+    if (!g || !engine?.world || creating || text.length < 3) return;
+    setCreating(true);
+    try {
+      const message = await g.create(text);
+      const pose = { position: engine.player.position.clone(), yaw: engine.player.yaw, pitch: engine.player.pitch, flying: engine.player.flying };
+      const ok = await openLive(engine.world.world_id);
+      if (ok) {
+        engine.player.position.copy(pose.position);
+        engine.player.yaw = pose.yaw;
+        engine.player.pitch = pose.pitch;
+        engine.player.flying = pose.flying;
+        startGameplay(true);
+      }
+      setCreateText("");
+      setCreateOpen(false);
+      toast(ok ? message : `${message} Reopen the world to see it.`, ok ? "info" : "error");
+    } catch (e) {
+      toast(`Creation failed: ${(e as Error).message}`, "error");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const openSampleWorld = async () => {
     const ok = await openOffline();
     if (ok) startGameplay(false);
@@ -368,9 +409,30 @@ export function App() {
       {screen === "playing" && status && (
         <Hud worldName={engine?.world?.name ?? ""} live={source === "live"}
           interpreter={(notes[0] ?? "").replace("interpreted by ", "") || null}
-          prompt={interaction} toasts={toasts} paused={!status.pointerLocked} locomotion={engine?.player.locomotion ?? ""}
+          prompt={interaction} toasts={toasts} paused={!status.pointerLocked && !createOpen} locomotion={engine?.player.locomotion ?? ""}
           onResume={() => engine?.player.lock()} onExit={showLanding} devMode={devMode}
           onToggleDev={() => { engine?.setDevMode(!devMode); setDevMode(!devMode); }} />
+      )}
+
+      {createOpen && screen === "playing" && (
+        <div className="create-panel">
+          <div className="create-card">
+            <h3>Create something in this world</h3>
+            <textarea autoFocus rows={3} maxLength={500} disabled={creating} value={createText}
+              placeholder="A gigantic luminous toroidal ring hovering in front of me, with three smaller intersecting rings"
+              onChange={(e) => setCreateText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") { e.preventDefault(); setCreateOpen(false); }
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void runCreate(); }
+              }} />
+            <div className="row">
+              <span className="hint small">{creating ? "Creating… (Gemini designs the geometry, then the world reloads)" : "Enter to create · Esc to close"}</span>
+              <button className="primary" disabled={creating || createText.trim().length < 3} onClick={() => void runCreate()}>
+                {creating ? "Creating…" : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {fatal && <div className="modal"><h2>Cannot start the renderer</h2><p>{fatal}</p></div>}

@@ -26,6 +26,7 @@ from greality_contracts import (
 )
 
 from . import procgen
+from . import geometry_bounds
 from .geometry_normalize import NormalizeError, normalize_graph
 from .archetypes import ARCHETYPE_PROFILE, library
 from .terrain import terrain_height
@@ -105,7 +106,7 @@ class VarDraft(BaseModel):
     value: float
 
 
-class ObjectDraft(BaseModel):
+class ObjectShapeDraft(BaseModel):
     """A new kind of object whose geometry the model constructs from the SDF operation language."""
 
     model_config = ConfigDict(extra="ignore")
@@ -120,6 +121,11 @@ class ObjectDraft(BaseModel):
     physical_material: str = Field(default="", description="e.g. wood, crystal, stone, fungus, metal")
     vars: list[VarDraft] = Field(default_factory=list, description="initial state variables (0-6), e.g. emission 1")
     interactions: list[InteractionDraft] = Field(default_factory=list, description="0-3 player interactions")
+
+
+class ObjectDraft(ObjectShapeDraft):
+    """An object kind placed across a new world."""
+
     placement: Placement = "everywhere"
     density_per_hectare: float = Field(default=0.0, description="for scattered objects, 1-200")
     count: int = Field(default=0, description="for a fixed number of large objects, 1-40")
@@ -148,9 +154,36 @@ class WorldDraft(BaseModel):
     temperature_c: float = 18.0
     ambient_light: float = Field(default=0.25, description="0.03 = very dark night, 0.25 = day")
     cloud_cover: float = Field(default=0.35, description="0 clear sky .. 1 overcast")
+    requested_structures: list[str] = Field(
+        default_factory=list,
+        description="every distinct structure or object kind the user explicitly asks for, as short noun phrases "
+                    "(e.g. 'floating ring', 'spiral tower', 'crystal arch'); each needs its own entry in objects")
     features: list[FeatureDraft] = Field(default_factory=list)
     objects: list[ObjectDraft] = Field(default_factory=list, description="newly constructed object kinds")
     unsupported: list[str] = Field(default_factory=list, description="requested things that cannot be represented")
+
+
+class CreationObjectDraft(ObjectShapeDraft):
+    """One object added to an existing world by a player's creation request, laid out around an anchor point in front
+    of the player (+forward = the player's view direction on the ground, +right = to the player's right)."""
+
+    forward_m: float = Field(default=0.0, description="offset from the group's anchor along the view direction, -80..80")
+    right_m: float = Field(default=0.0, description="offset from the anchor to the player's right, -80..80")
+    height_m: float = Field(default=0.0, description="how far its base floats above the ground; 0 = standing on it")
+    yaw_deg: float = Field(default=0.0, description="rotation about the vertical axis")
+    scale: float = Field(default=1.0, description="0.2-5")
+
+
+class CreationDraft(BaseModel):
+    """Language-model facing schema for adding objects to an existing world (flat, like WorldDraft)."""
+
+    model_config = ConfigDict(extra="ignore")
+    title: str = Field(description="short name of what is being created, e.g. 'Crystal ring gate'")
+    requested_structures: list[str] = Field(
+        default_factory=list, description="every distinct structure the request asks for, as short noun phrases")
+    distance_m: float = Field(default=0.0, description="how far ahead of the player the group's anchor is; 0 = automatic")
+    objects: list[CreationObjectDraft] = Field(default_factory=list, description="1-4 constructed objects")
+    unsupported: list[str] = Field(default_factory=list)
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -173,6 +206,7 @@ OBJECT_MAX_NODES = 72
 OBJECT_MAX_NOISE_OPS = 3
 OBJECT_MAX_OCTAVES = 3
 SCENE_MAX_OBJECT_NODES = 360
+MAX_OBJECT_BOUND_M = 150.0
 
 
 def _enforce_budget(root) -> None:
@@ -195,7 +229,7 @@ def _enforce_budget(root) -> None:
         raise ValueError(f"{noise} displace/warp nodes exceeds the budget of {OBJECT_MAX_NOISE_OPS}")
 
 
-def object_geometry(obj: ObjectDraft, index: int) -> GeometryDefinition:
+def object_geometry(obj: ObjectShapeDraft, index: int, id_prefix: str = "obj") -> GeometryDefinition:
     """Validate a model-constructed object: closed op set, numeric ranges, node/depth limits (raises ValueError)."""
     try:
         root = json.loads(obj.geometry_json)
@@ -245,14 +279,117 @@ def object_geometry(obj: ObjectDraft, index: int) -> GeometryDefinition:
     _enforce_budget(root)
     if isinstance(root, dict) and "material" not in root:
         root["material"] = mats[0]["id"]  # default for any primitive that does not name one
-    return GeometryDefinition.model_validate({
-        "id": f"obj.{_slug(obj.name)}.{index}", "version": 1,
+    geom = GeometryDefinition.model_validate({
+        "id": f"{id_prefix}.{_slug(obj.name)}.{index}", "version": 1,
         "bound_radius": _clamp(obj.size_m, 0.5, 120.0) * 1.15,
         "parameters": params, "materials": mats, "root": root,
     })
+    # The model's size_m is only an estimate: derive the bound from the geometry itself (never smaller than claimed).
+    box = geometry_bounds.bounds(geom.root.model_dump(mode="json"), _param_specs(geom))
+    if box is None:
+        raise ValueError("the geometry is unbounded (a bare plane); intersect planes with a bounded shape")
+    measured = geometry_bounds.radius_from_origin(box) * 1.05
+    if measured > geom.bound_radius:
+        geom = geom.model_copy(update={"bound_radius": _clamp(measured, 0.5, MAX_OBJECT_BOUND_M)})
+    return geom
 
 
-def object_behavior(obj: ObjectDraft, geom: GeometryDefinition, notes: list[str]) -> ObjectBehavior:
+def _param_specs(geom: GeometryDefinition) -> dict[str, dict]:
+    return {k: v.model_dump() for k, v in (geom.parameters or {}).items()}
+
+
+def _refs(node, out: set) -> set:
+    if isinstance(node, dict):
+        if set(node) == {"ref"}:
+            out.add(str(node["ref"]))
+        for v in node.values():
+            _refs(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _refs(v, out)
+    return out
+
+
+def _stem(word: str) -> str:
+    w = word.lower()
+    for suffix in ("ies", "es", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            return w[: -len(suffix)] + ("y" if suffix == "ies" else "")
+    return w
+
+
+_FILLER = {"giant", "enormous", "huge", "large", "small", "tiny", "big", "with", "the", "and", "floating",
+           "hovering", "levitating", "glowing", "luminous", "twisted", "crystal", "crystalline", "geometric", "alien",
+           "some", "many", "few", "three", "two", "several", "tall", "massive", "strange", "ancient"}
+_FILLER_STEMS = {_stem(w) for w in _FILLER}
+
+
+def _words(text: str) -> set:
+    return {_stem(w) for w in "".join(c if c.isalnum() else " " for c in text).split() if len(w) > 2}
+
+
+def object_report(obj: ObjectShapeDraft, geom: GeometryDefinition) -> tuple[list[str], list[str], str]:
+    """Geometric checks of one validated object -> (hard issues, soft hints, one-line measurement summary).
+
+    Hard issues are worth a repair round with the model: the object is buried, degenerate, or declares parameters it
+    never uses. Soft hints (flat, sparse) are passed along only when a repair happens anyway."""
+    hard: list[str] = []
+    soft: list[str] = []
+    root = geom.root.model_dump(mode="json")
+    nodes = _count_nodes(geom.root)
+    (x0, y0, z0), (x1, y1, z1) = geometry_bounds.bounds(root, _param_specs(geom))
+    w, h = max(x1 - x0, z1 - z0), y1 - y0
+    summary = f"{nodes} nodes, spans x {x0:.1f}..{x1:.1f}, y {y0:.1f}..{y1:.1f}, z {z0:.1f}..{z1:.1f} m"
+    unused = [k for k in geom.parameters if k != "burn" and k not in _refs(root, set())]
+    if unused:
+        hard.append(f"declares parameters {unused} but never uses them as {{\"ref\": name}} in its geometry")
+    if max(w, h) < 0.3:
+        hard.append("it is smaller than 0.3 m: check units (meters)")
+    if y0 < -(0.35 * h) - 0.25:
+        hard.append(f"{min(100, round(100 * -y0 / max(h, 1e-6)))}% of its height is below its base (y = 0), so it is "
+                    f"buried in the ground: centred primitives (box, cylinder, cone, sphere, torus, polyhedron) extend "
+                    f"below y = 0 unless translated up; translate it so its lowest point is at y = 0 "
+                    f"(objects that float are raised further)")
+    if nodes <= 3:
+        hard.append(f"only {nodes} geometry nodes: too simple to be recognizable as '{obj.name[:40]}'")
+    elif nodes < 7:
+        soft.append(f"only {nodes} geometry nodes; add the characteristic parts that make it recognizable")
+    if w > 4.0 and h < 0.12 * w:
+        soft.append(f"it is flat ({w:.1f} m wide, {h:.1f} m tall); if it should stand upright (ring, arch, portal, "
+                    f"wall) rotate it: a torus lies in the XZ plane, 90 degrees about X is quat [0.7071, 0, 0, 0.7071]")
+    return hard, soft, summary
+
+
+def draft_report(objects: list, requested: list) -> tuple[list[str], list[str]]:
+    """Validation + geometric checks of a draft's objects -> (hard issues, every line incl. soft hints and
+    measurements). A requested structure with no object whose name or kind shares a significant word is hard."""
+    hard: list[str] = []
+    every: list[str] = []
+    covered: set = set()
+    for i, obj in enumerate(objects[:8]):
+        label = f"object {i} ({obj.name[:40]})"
+        try:
+            geom = object_geometry(obj, i)
+        except ValueError as exc:
+            msg = f"{label}: failed geometry validation: {str(exc)[:300]}"
+            hard.append(msg)
+            every.append(msg)
+            continue
+        covered |= _words(f"{obj.name} {obj.kind}")
+        h, soft, summary = object_report(obj, geom)
+        every.append(f"{label}: {summary}")
+        hard += [f"{label}: {m}" for m in h]
+        every += [f"{label}: {m}" for m in h + soft]
+    for item in requested[:10]:
+        key = _words(item) - _FILLER_STEMS
+        if key and not key & covered:
+            msg = f"requested '{item[:60]}' has no object of its own; construct it (one object per requested structure)"
+            hard.append(msg)
+            every.append(msg)
+    return hard, every
+
+
+def object_behavior(obj: ObjectShapeDraft, geom: GeometryDefinition, notes: list[str]) -> ObjectBehavior:
     """Validate a model-composed behaviour against its own geometry. Invalid interactions are dropped with a note;
     nothing in a behaviour is code: the server executes it with world_api.interactions (a closed grammar)."""
     vars_ = {}

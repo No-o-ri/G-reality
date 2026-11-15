@@ -23,7 +23,11 @@ SYNONYMS = {
     "translation": "translate", "move": "translate", "position": "translate", "rotation": "rotate",
     "uniform_scale": "scale", "nonuniform_scale": "stretch", "scale3": "stretch", "polar_repeat": "radial_repeat",
     "radial": "radial_repeat", "array": "repeat", "noise": "displace", "bump": "displace", "hollow": "shell",
+    "helix": "spiral_repeat", "spiral": "spiral_repeat", "helical_repeat": "spiral_repeat", "spiral_array": "spiral_repeat",
+    "platonic": "polyhedron", "platonic_solid": "polyhedron", "regular_polyhedron": "polyhedron",
 }
+# named regular solids become polyhedron {kind}; their size may be given as radius or size
+POLYHEDRA = {"tetrahedron": 0, "hexahedron": 1, "octahedron": 2, "dodecahedron": 3, "icosahedron": 4}
 MAX_EXPANDED_NODES = 128
 
 
@@ -108,10 +112,14 @@ def normalize_graph(doc: Any) -> dict:
             raise NormalizeError(f"more than {MAX_EXPANDED_NODES} nodes after expanding definitions")
         op = str(node.get("op", "")).strip().lower().replace("-", "_").replace(" ", "_")
         op = SYNONYMS.get(op, op)
+        params = node.get("params") or {}
+        if op in POLYHEDRA:
+            params = {"kind": POLYHEDRA[op], "radius": params.get("radius", params.get("size", node.get("radius", 1.0)))}
+            op = "polyhedron"
         if op not in ops:
             raise NormalizeError(f"unknown op '{node.get('op')}'")
         spec = ops[op]
-        params = node.get("params") or {k: v for k, v in node.items() if k in spec.get("params", {})}
+        params = params or {k: v for k, v in node.items() if k in spec.get("params", {})}
         if not isinstance(params, dict):
             params = {}
         children = [walk(c, depth + 1) for c in (node.get("children") or [])]

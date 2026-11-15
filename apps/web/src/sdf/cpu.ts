@@ -12,6 +12,20 @@ const box = (x: number, y: number, z: number, a: number, b: number, c: number) =
   return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0);
 };
 
+// Face-normal constants of the regular polyhedra (same as sdPolyhedron in glsl.ts).
+const PA = 0.5773502691896258, PB = 0.5257311121191336, PC = 0.8506508083520399, PD = 0.3568220897730899, PE = 0.9341723589627157;
+const dotAbs = (p: Vec3, x: number, y: number, z: number) => Math.abs(p[0] * x + p[1] * y + p[2] * z);
+/** max over face normals of dot(p, n) (before subtracting the inradius); kind 0..4 = tetra, cube, octa, dodeca, icosa */
+function polyhedron(p: Vec3, kind: number): number {
+  const [x, y, z] = p;
+  if (kind === 0) return Math.max((x + y + z) * PA, (-x - y + z) * PA, (x - y - z) * PA, (-x + y - z) * PA);
+  const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
+  if (kind === 1) return Math.max(ax, ay, az);
+  if (kind === 2) return (ax + ay + az) * PA;
+  if (kind === 3) return Math.max(dotAbs(p, 0, PB, PC), dotAbs(p, 0, -PB, PC), dotAbs(p, PB, PC, 0), dotAbs(p, -PB, PC, 0), dotAbs(p, PC, 0, PB), dotAbs(p, -PC, 0, PB));
+  return Math.max((ax + ay + az) * PA, dotAbs(p, 0, PD, PE), dotAbs(p, 0, -PD, PE), dotAbs(p, PE, 0, PD), dotAbs(p, -PE, 0, PD), dotAbs(p, PD, PE, 0), dotAbs(p, -PD, PE, 0));
+}
+
 /** Compile the AST once. Each closure owns its result and domain scratch point;
  * only the public call allocates a result, so callers can retain it safely. */
 export function compileCpu(def: GeometryDefinition): SdfFn {
@@ -108,6 +122,10 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
         const major = s('major'), minor = s('minor');
         distance = (p, a) => Math.hypot(Math.hypot(p[0], p[2]) - major(a), p[1]) - minor(a); break;
       }
+      case 'polyhedron': {
+        const kind = Number(p.kind), r = s('radius');
+        distance = (q, a) => polyhedron(q, kind) - r(a); break;
+      }
       case 'plane': {
         const n = v('normal'), offset = s('offset');
         distance = (p, a) => {
@@ -149,8 +167,11 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
           return out;
         };
       }
-      case 'radial_repeat': case 'taper': case 'stretch': case 'translate': case 'rotate': case 'scale': case 'repeat': case 'mirror': case 'twist': case 'bend': case 'warp': {
+      case 'radial_repeat': case 'spiral_repeat': case 'taper': case 'stretch': case 'translate': case 'rotate': case 'scale': case 'repeat': case 'mirror': case 'twist': case 'bend': case 'warp': {
         const q: Vec3 = [0, 0, 0];
+        const spiralCount = node.op === 'spiral_repeat' ? s('count') : () => 1;
+        const spiralPitch = node.op === 'spiral_repeat' ? s('pitch') : () => 0;
+        const spiralCopies = node.op === 'spiral_repeat' ? s('copies') : () => 1;
         const offset = node.op === 'translate' ? v('offset') : [];
         const period = node.op === 'repeat' ? v('period') : [], count = node.op === 'repeat' ? v('count') : [];
         const stretch = node.op === 'stretch' ? v('factor') : [];
@@ -178,6 +199,17 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
               const r = Math.hypot(p[0], p[2]);
               q[0] = r * Math.cos(folded); q[2] = r * Math.sin(folded); break;
             }
+            case 'spiral_repeat': {
+              const n = Math.max(Math.floor(spiralCount(a) + 0.5), 1), total = Math.max(Math.floor(spiralCopies(a) + 0.5), 1);
+              const sector = 2 * Math.PI / n;
+              let ang = Math.atan2(p[2], p[0]);
+              if (ang < 0) ang += 2 * Math.PI;
+              const fk = Math.floor(ang / sector + 0.5), k = fk - n * Math.floor(fk / n);
+              const rise = spiralPitch(a) / n;
+              const j = clamp(rise > 1e-6 ? k + n * Math.floor((p[1] / rise - k) / n + 0.5) : k, 0, total - 1);
+              const c = Math.cos(j * sector), sn = Math.sin(j * sector);
+              q[0] = c * p[0] + sn * p[2]; q[1] = p[1] - j * rise; q[2] = -sn * p[0] + c * p[2]; break;
+            }
             case 'mirror': q[axis] = Math.abs(q[axis]); break;
             case 'repeat': for (let i = 0; i < 3; i++) { const per = period[i](a), c = count[i](a); q[i] -= per * clamp(Math.round(q[i] / per), -c, c); } break;
             case 'rotate': {
@@ -204,7 +236,7 @@ export function compileCpu(def: GeometryDefinition): SdfFn {
 
 export function stepScale(def: GeometryDefinition): number {
   const visit = (n: GeometryNode): number => Math.min(
-    n.op === 'radial_repeat' ? 0.9 : n.op === 'taper' ? 0.6 : n.op === 'ellipsoid' ? 0.8 : n.op === 'twist' || n.op === 'bend' ? 0.6 : n.op === 'warp' || n.op === 'displace' ? 0.7 : 1,
+    n.op === 'radial_repeat' ? 0.9 : n.op === 'spiral_repeat' ? 0.8 : n.op === 'taper' ? 0.6 : n.op === 'ellipsoid' ? 0.8 : n.op === 'twist' || n.op === 'bend' ? 0.6 : n.op === 'warp' || n.op === 'displace' ? 0.7 : 1,
     ...(n.children ?? []).map(visit));
   return visit(def.root);
 }

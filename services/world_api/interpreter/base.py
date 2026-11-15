@@ -11,7 +11,7 @@ from typing import Literal, Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..worldspec import WorldDraft
+from ..worldspec import CreationDraft, WorldDraft
 
 ActionName = Literal["interact", "ignite", "extinguish", "remove", "build", "inspect", "unknown"]
 
@@ -28,6 +28,8 @@ class CommandContext(BaseModel):
 
     nearby_kinds: list[str] = Field(default_factory=list)
     aimed_kind: Optional[str] = None
+    world_title: str = ""
+    terrain_summary: str = ""  # e.g. "gentle hills, lake 30 m to the north-west"
 
 
 class InterpreterError(Exception):
@@ -47,3 +49,5 @@ class Interpreter(Protocol):
     def world(self, prompt: str) -> WorldDraft: ...
 
     def command(self, text: str, context: CommandContext) -> IntentDraft: ...
+
+    def create(self, text: str, context: CommandContext) -> CreationDraft: ...

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from ..worldspec import FeatureDraft, WorldDraft
-from .base import CommandContext, IntentDraft
+from .base import CommandContext, IntentDraft, InterpreterError
 
 _ACTION_WORDS = {
     "ignite": ("fire", "ignite", "burn", "torch", "light", "ablaze"),
@@ -88,3 +88,9 @@ class RulesInterpreter:
         if action == "extinguish" and kind == "campfire" and "campfire" not in t:
             kind = None
         return IntentDraft(action=action, target_kind=kind, confidence=0.9 if action != "unknown" else 0.0)
+
+    def create(self, text: str, context: CommandContext):
+        # Keywords cannot design new geometry; refusing is more honest than placing a stock shape.
+        raise InterpreterError(
+            "unavailable", "Creating new objects needs the Gemini language model (set GEMINI_API_KEY); the keyword "
+                           "interpreter cannot design geometry.")

@@ -88,6 +88,11 @@ export class Gameplay {
 
   constructor(private readonly engine: Engine, private readonly companion: Companion | null, private readonly ui: GameplayEvents) {}
 
+  /** true when connected to a companion (changes are possible); false for the read-only sample */
+  get live(): boolean {
+    return this.companion !== null;
+  }
+
   start(): void {
     const world = this.engine.world;
     if (!world) return;
@@ -295,6 +300,32 @@ export class Gameplay {
         this.engine.fire.burst(m.particles, m.position as [number, number, number], (m.color as [number, number, number] | null) ?? null, Math.max(10, m.count || 60), h);
       }
     }
+  }
+
+  /**
+   * T panel: ask the server to design new objects and add them in front of the player. The server persists them as
+   * one world revision (archetypes in the world spec, entities in their regions); the caller reopens the world to
+   * compile them. Resolves with the server's message, or throws with a user-facing reason.
+   */
+  async create(text: string): Promise<string> {
+    const world = this.engine.world;
+    if (!world) throw new Error("No world is open.");
+    if (!this.companion) throw new Error("World creation requires the Windows companion.");
+    const p = this.engine.player;
+    const f = p.forward();
+    const result: MutationResult = await this.companion.command({
+      command_id: crypto.randomUUID(),
+      world_id: world.world_id,
+      player_id: world.player.player_id,
+      text,
+      action: "build",
+      player_position: [p.position.x, p.position.y - 1.7, p.position.z],
+      view_direction: [f.x, f.y, f.z],
+      expected_world_revision: this.revision,
+    }, 300_000);
+    if (result.status !== "committed") throw new Error(result.message || "Nothing was created.");
+    this.revision = Math.max(this.revision, result.world_revision);
+    return result.message;
   }
 
   /** E key: ask the server to ignite the entity under the crosshair. */
